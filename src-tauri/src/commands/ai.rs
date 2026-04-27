@@ -8,13 +8,14 @@ use crate::{
         ensure_ollama_model, generate_ollama_chat_response, model_profile_catalog,
         plan_local_model_runtime, plan_model_import, plan_qwopus_runtime,
         plan_qwopus_runtime_from_request, search_hugging_face_gguf_models as search_hf_gguf_models,
-        AiModelProfile, AiRequestSnapshot, AiRuntimeSnapshot, EnsureOllamaModelRequest,
-        EnsureOllamaModelResponse, GenerateChatResponse, GenerateChatResponseRequest,
-        GpuMemoryProfile, HuggingFaceError, HuggingFaceGgufSearchResponse, LocalChatError,
-        LocalModelError, LocalModelRuntimePlan, ModelImportPlan, ModelImportPlanError,
-        ModelImportPlanRequest, ModelPlanningError, ModelRuntimePlanRequest,
-        ProposeUiChangeRequest, QwopusRuntimePlan, SearchHuggingFaceGgufModelsRequest,
-        MODEL_INSTALL_PROGRESS_EVENT, QWOPUS_MODEL_ID,
+        unload_ollama_model as unload_ollama_model_runtime, AiModelProfile, AiRequestSnapshot,
+        AiRuntimeSnapshot, EnsureOllamaModelRequest, EnsureOllamaModelResponse,
+        GenerateChatResponse, GenerateChatResponseRequest, GpuMemoryProfile, HuggingFaceError,
+        HuggingFaceGgufSearchResponse, LocalChatError, LocalModelError, LocalModelRuntimePlan,
+        ModelImportPlan, ModelImportPlanError, ModelImportPlanRequest, ModelPlanningError,
+        ModelRuntimePlanRequest, ProposeUiChangeRequest, QwopusRuntimePlan,
+        SearchHuggingFaceGgufModelsRequest, UnloadOllamaModelRequest, MODEL_INSTALL_PROGRESS_EVENT,
+        QWOPUS_MODEL_ID,
     },
     app_state::AppState,
     error::{CommandError, ErrorCode},
@@ -70,6 +71,13 @@ pub async fn generate_ollama_chat(
     request: GenerateChatResponseRequest,
 ) -> Result<GenerateChatResponse, CommandError> {
     generate_ollama_chat_response(request)
+        .await
+        .map_err(local_chat_error)
+}
+
+#[tauri::command]
+pub async fn unload_ollama_model(request: UnloadOllamaModelRequest) -> Result<(), CommandError> {
+    unload_ollama_model_runtime(request)
         .await
         .map_err(local_chat_error)
 }
@@ -284,7 +292,8 @@ fn local_chat_error(error: LocalChatError) -> CommandError {
         | LocalChatError::InvalidRepeatLastN { .. }
         | LocalChatError::InvalidTopP { .. }
         | LocalChatError::InvalidTopK { .. }
-        | LocalChatError::InvalidStopSequences { .. } => {
+        | LocalChatError::InvalidStopSequences { .. }
+        | LocalChatError::InvalidKeepAlive { .. } => {
             CommandError::new(ErrorCode::InvalidRequest, message, true)
         }
         LocalChatError::RequestTimedOut { .. }

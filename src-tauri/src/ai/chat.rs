@@ -10,6 +10,9 @@ const DEFAULT_OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434";
 const DEFAULT_TIMEOUT_MS: u64 = 180_000;
 const MIN_TIMEOUT_MS: u64 = 1_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_KEEP_ALIVE: &str = "30s";
+const UNLOAD_KEEP_ALIVE: u8 = 0;
+const MAX_KEEP_ALIVE_CHARS: usize = 32;
 const MAX_CHAT_MESSAGES: usize = 24;
 const MAX_MESSAGE_CHARS: usize = 8_000;
 const MAX_SYSTEM_CHARS: usize = 4_000;
@@ -46,6 +49,9 @@ const COMPACTED_HISTORY_MESSAGES: usize = 6;
 pub struct GenerateChatResponseRequest {
     pub ollama_model_name: String,
     pub endpoint: Option<String>,
+    pub keep_alive: Option<String>,
+    #[serde(default)]
+    pub think: Option<bool>,
     #[serde(default)]
     pub system_prompt: Option<String>,
     pub messages: Vec<ChatMessageRequest>,
@@ -87,9 +93,19 @@ pub struct ChatGenerationOptions {
 pub struct GenerateChatResponse {
     pub ollama_model_name: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     pub prompt_eval_count: Option<u32>,
     pub eval_count: Option<u32>,
     pub total_duration_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnloadOllamaModelRequest {
+    pub ollama_model_name: String,
+    pub endpoint: Option<String>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -97,7 +113,20 @@ struct OllamaChatRequest {
     model: String,
     messages: Vec<OllamaChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(rename = "keep_alive")]
+    keep_alive: String,
     options: OllamaChatOptions,
+}
+
+#[derive(Serialize)]
+struct OllamaGenerateUnloadRequest {
+    model: String,
+    prompt: &'static str,
+    stream: bool,
+    #[serde(rename = "keep_alive")]
+    keep_alive: u8,
 }
 
 #[derive(Clone, Serialize)]
@@ -144,6 +173,7 @@ struct OllamaChatResponse {
 #[derive(Deserialize)]
 struct OllamaChatResponseMessage {
     content: String,
+    thinking: Option<String>,
 }
 
 pub async fn generate_ollama_chat_response(
@@ -175,19 +205,62 @@ pub async fn generate_ollama_chat_response(
         .json::<OllamaChatResponse>()
         .await
         .map_err(|source| LocalChatError::Decode { source })?;
-    let content = response
-        .message
-        .map(|message| message.content.trim().to_owned())
-        .filter(|content| !content.is_empty())
-        .ok_or(LocalChatError::EmptyResponse)?;
+
+    generate_chat_response_from_ollama(response)
+}
+
+fn generate_chat_response_from_ollama(
+    response: OllamaChatResponse,
+) -> Result<GenerateChatResponse, LocalChatError> {
+    let message = response.message.ok_or(LocalChatError::EmptyResponse)?;
+    let content = message.content.trim().to_owned();
+    if content.is_empty() {
+        return Err(LocalChatError::EmptyResponse);
+    }
+    let thinking = message
+        .thinking
+        .map(|thinking| thinking.trim().to_owned())
+        .filter(|thinking| !thinking.is_empty());
 
     Ok(GenerateChatResponse {
         ollama_model_name: response.model,
         content,
+        thinking,
         prompt_eval_count: response.prompt_eval_count,
         eval_count: response.eval_count,
         total_duration_ns: response.total_duration,
     })
+}
+
+pub async fn unload_ollama_model(request: UnloadOllamaModelRequest) -> Result<(), LocalChatError> {
+    let unload_request = OllamaGenerateUnloadRequest {
+        model: normalize_ollama_model_name(&request.ollama_model_name)?,
+        prompt: "",
+        stream: false,
+        keep_alive: UNLOAD_KEEP_ALIVE,
+    };
+    let endpoint = generate_endpoint(request.endpoint.as_deref())?;
+    let timeout = request_timeout(request.timeout_ms.or(Some(15_000)))?;
+    let client = reqwest::Client::new();
+
+    let response = time::timeout(
+        timeout,
+        client.post(endpoint.clone()).json(&unload_request).send(),
+    )
+    .await
+    .map_err(|_| LocalChatError::RequestTimedOut { timeout })?
+    .map_err(|source| LocalChatError::Request { endpoint, source })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let message = response.text().await.unwrap_or_default();
+        return Err(LocalChatError::Http {
+            status,
+            message: trim_error_message(&message),
+        });
+    }
+
+    Ok(())
 }
 
 fn build_ollama_chat_request(
@@ -195,6 +268,7 @@ fn build_ollama_chat_request(
 ) -> Result<OllamaChatRequest, LocalChatError> {
     let model = normalize_ollama_model_name(&request.ollama_model_name)?;
     let options = chat_options(&request.options)?;
+    let keep_alive = validate_keep_alive(request.keep_alive.as_deref())?;
     let messages = prompt_messages(
         &request.system_prompt,
         &request.messages,
@@ -209,6 +283,8 @@ fn build_ollama_chat_request(
         model,
         messages,
         stream: false,
+        think: request.think,
+        keep_alive,
         options,
     })
 }
@@ -414,6 +490,14 @@ fn prompt_input_budget_tokens(options: &OllamaChatOptions) -> usize {
 }
 
 fn chat_endpoint(raw_endpoint: Option<&str>) -> Result<Url, LocalChatError> {
+    api_endpoint(raw_endpoint, "/api/chat")
+}
+
+fn generate_endpoint(raw_endpoint: Option<&str>) -> Result<Url, LocalChatError> {
+    api_endpoint(raw_endpoint, "/api/generate")
+}
+
+fn api_endpoint(raw_endpoint: Option<&str>, path: &str) -> Result<Url, LocalChatError> {
     let endpoint = raw_endpoint
         .map(str::trim)
         .filter(|endpoint| !endpoint.is_empty())
@@ -429,7 +513,7 @@ fn chat_endpoint(raw_endpoint: Option<&str>) -> Result<Url, LocalChatError> {
         });
     }
 
-    url.set_path("/api/chat");
+    url.set_path(path);
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
@@ -450,6 +534,30 @@ fn request_timeout(timeout_ms: Option<u64>) -> Result<Duration, LocalChatError> 
         return Err(LocalChatError::InvalidTimeout { timeout_ms });
     }
     Ok(Duration::from_millis(timeout_ms))
+}
+
+fn validate_keep_alive(value: Option<&str>) -> Result<String, LocalChatError> {
+    let keep_alive = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_KEEP_ALIVE);
+
+    if keep_alive.chars().count() > MAX_KEEP_ALIVE_CHARS {
+        return Err(LocalChatError::InvalidKeepAlive {
+            value: keep_alive.to_owned(),
+        });
+    }
+
+    let valid = keep_alive
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.');
+    if !valid {
+        return Err(LocalChatError::InvalidKeepAlive {
+            value: keep_alive.to_owned(),
+        });
+    }
+
+    Ok(keep_alive.to_owned())
 }
 
 fn chat_options(options: &ChatGenerationOptions) -> Result<OllamaChatOptions, LocalChatError> {
@@ -558,7 +666,9 @@ fn validate_top_k(value: Option<u32>) -> Result<u32, LocalChatError> {
 
 fn validate_stop_sequences(value: Option<&[String]>) -> Result<Vec<String>, LocalChatError> {
     let sequences: Vec<String> = match value {
-        Some(value) if !value.is_empty() => value.iter().map(|item| item.trim().to_owned()).collect(),
+        Some(value) if !value.is_empty() => {
+            value.iter().map(|item| item.trim().to_owned()).collect()
+        }
         _ => DEFAULT_STOP_SEQUENCES
             .iter()
             .map(|item| (*item).to_owned())
@@ -696,6 +806,8 @@ pub enum LocalChatError {
     InvalidTopK { value: u32, maximum: u32 },
     #[error("stop sequences are invalid: {reason}")]
     InvalidStopSequences { reason: String },
+    #[error("keep alive duration is invalid: {value}")]
+    InvalidKeepAlive { value: String },
     #[error("Ollama chat request timed out after {timeout:?}")]
     RequestTimedOut { timeout: Duration },
     #[error("Ollama chat request failed: {endpoint}")]
@@ -738,10 +850,20 @@ mod tests {
     }
 
     #[test]
+    fn builds_local_generate_endpoint() {
+        let endpoint =
+            generate_endpoint(Some("http://127.0.0.1:11434/custom")).expect("endpoint is local");
+
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:11434/api/generate");
+    }
+
+    #[test]
     fn builds_ollama_request_with_recent_messages() {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: Some("system".to_owned()),
             messages: vec![
                 ChatMessageRequest {
@@ -769,6 +891,7 @@ mod tests {
         assert_eq!(built.messages[0].role, "system");
         assert_eq!(built.messages[1].role, "user");
         assert_eq!(built.messages[2].role, "assistant");
+        assert_eq!(built.keep_alive, DEFAULT_KEEP_ALIVE);
         assert_eq!(built.options.num_ctx, Some(8192));
         assert_eq!(built.options.repeat_penalty, Some(DEFAULT_REPEAT_PENALTY));
         assert_eq!(built.options.repeat_last_n, Some(DEFAULT_REPEAT_LAST_N));
@@ -786,10 +909,107 @@ mod tests {
     }
 
     #[test]
+    fn serializes_ollama_request_with_think_enabled() {
+        let request = GenerateChatResponseRequest {
+            ollama_model_name: "qwen3:latest".to_owned(),
+            endpoint: None,
+            keep_alive: None,
+            think: Some(true),
+            system_prompt: None,
+            messages: vec![ChatMessageRequest {
+                role: ChatRole::User,
+                content: "show your work".to_owned(),
+            }],
+            options: ChatGenerationOptions::default(),
+            timeout_ms: None,
+        };
+
+        let built = build_ollama_chat_request(&request).expect("request is valid");
+        let json = serde_json::to_value(&built).expect("request serializes");
+
+        assert_eq!(json.get("think"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn parses_thinking_response_without_changing_content() {
+        let response = serde_json::from_str::<OllamaChatResponse>(
+            r#"{
+                "model": "qwen3:latest",
+                "message": {
+                    "role": "assistant",
+                    "thinking": " reasoning trace ",
+                    "content": " final answer "
+                },
+                "prompt_eval_count": 12,
+                "eval_count": 34,
+                "total_duration": 56
+            }"#,
+        )
+        .expect("response shape is valid");
+
+        let parsed =
+            generate_chat_response_from_ollama(response).expect("response content is present");
+
+        assert_eq!(parsed.ollama_model_name, "qwen3:latest");
+        assert_eq!(parsed.content, "final answer");
+        assert_eq!(parsed.thinking.as_deref(), Some("reasoning trace"));
+        assert_eq!(parsed.prompt_eval_count, Some(12));
+        assert_eq!(parsed.eval_count, Some(34));
+        assert_eq!(parsed.total_duration_ns, Some(56));
+    }
+
+    #[test]
+    fn accepts_custom_keep_alive() {
+        let request = GenerateChatResponseRequest {
+            ollama_model_name: "qwopus:q4_k_m".to_owned(),
+            endpoint: None,
+            keep_alive: Some("2m".to_owned()),
+            think: None,
+            system_prompt: None,
+            messages: vec![ChatMessageRequest {
+                role: ChatRole::User,
+                content: "hello".to_owned(),
+            }],
+            options: ChatGenerationOptions::default(),
+            timeout_ms: None,
+        };
+
+        let built = build_ollama_chat_request(&request).expect("request is valid");
+
+        assert_eq!(built.keep_alive, "2m");
+    }
+
+    #[test]
+    fn rejects_invalid_keep_alive() {
+        let request = GenerateChatResponseRequest {
+            ollama_model_name: "qwopus:q4_k_m".to_owned(),
+            endpoint: None,
+            keep_alive: Some("2 minutes".to_owned()),
+            think: None,
+            system_prompt: None,
+            messages: vec![ChatMessageRequest {
+                role: ChatRole::User,
+                content: "hello".to_owned(),
+            }],
+            options: ChatGenerationOptions::default(),
+            timeout_ms: None,
+        };
+
+        let error = build_ollama_chat_request(&request).err();
+
+        assert!(matches!(
+            error,
+            Some(LocalChatError::InvalidKeepAlive { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_empty_user_prompt() {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: Some("system".to_owned()),
             messages: Vec::new(),
             options: ChatGenerationOptions::default(),
@@ -806,6 +1026,8 @@ mod tests {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: None,
             messages: vec![ChatMessageRequest {
                 role: ChatRole::User,
@@ -833,6 +1055,8 @@ mod tests {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: None,
             messages: vec![ChatMessageRequest {
                 role: ChatRole::User,
@@ -876,6 +1100,8 @@ mod tests {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: None,
             messages,
             options: ChatGenerationOptions {
@@ -925,6 +1151,8 @@ mod tests {
         let request = GenerateChatResponseRequest {
             ollama_model_name: "qwopus:q4_k_m".to_owned(),
             endpoint: None,
+            keep_alive: None,
+            think: None,
             system_prompt: Some("system prompt".to_owned()),
             messages,
             options: ChatGenerationOptions {

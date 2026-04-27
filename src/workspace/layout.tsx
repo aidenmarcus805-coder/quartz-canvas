@@ -80,9 +80,21 @@ type GenerateChatMessage = {
 type GenerateChatResponse = {
   readonly ollamaModelName: string;
   readonly content: string;
+  readonly thinking?: string | null;
   readonly promptEvalCount?: number | null;
   readonly evalCount?: number | null;
   readonly totalDurationNs?: number | null;
+};
+
+type LoadedOllamaModel = {
+  readonly name: string;
+  readonly endpoint?: string;
+};
+
+type UnloadOllamaModelRequest = {
+  readonly ollamaModelName: string;
+  readonly endpoint?: string;
+  readonly timeoutMs?: number;
 };
 
 type ChatPromptBuild = {
@@ -112,6 +124,14 @@ type ModelInstallActivityTarget = {
   readonly baseLines: readonly string[];
   readonly messageId: string;
   readonly threadId: string;
+};
+
+type ChatMessageWithThinking = ChatMessage & {
+  readonly thinking?: string;
+};
+
+type AssistantMessageOptions = Pick<ChatMessage, "createdAt" | "status"> & {
+  readonly thinking?: string | null;
 };
 
 function createId(prefix: string) {
@@ -322,6 +342,15 @@ function readableErrorMessage(error: unknown) {
     return error.message;
   }
   return String(error);
+}
+
+function normalizeAssistantThinking(thinking: string | null | undefined) {
+  const trimmed = thinking?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function chatPromptContentForMessage(message: ChatMessage) {
+  return message.content;
 }
 
 function marketplaceOllamaModelName(selection: MarketplaceModelSelection) {
@@ -543,6 +572,8 @@ export function WorkspaceLayout() {
   );
   const [activePaneResize, setActivePaneResize] = useState<"left" | "chat" | null>(null);
   const cancelledMessageIdsRef = useRef(new Set<string>());
+  const loadedOllamaModelRef = useRef<LoadedOllamaModel | null>(null);
+  const modelUnloadPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const modelInstallThreadsRef = useRef(new Map<string, ModelInstallActivityTarget>());
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) ?? null;
@@ -599,7 +630,7 @@ export function WorkspaceLayout() {
     threadId: string,
     messageId: string,
     content: string,
-    options?: Pick<ChatMessage, "createdAt" | "status">
+    options?: AssistantMessageOptions
   ) => {
     if (cancelledMessageIdsRef.current.has(messageId)) {
       return;
@@ -612,19 +643,25 @@ export function WorkspaceLayout() {
         }
 
         const existing = thread.messages.find((message) => message.id === messageId);
-        const nextMessage: ChatMessage = {
+        const existingAssistantMessage = existing as ChatMessageWithThinking | undefined;
+        const nextThinking =
+          options && "thinking" in options
+            ? normalizeAssistantThinking(options.thinking)
+            : existingAssistantMessage?.thinking;
+        const nextMessage: ChatMessageWithThinking = {
           ...existing,
           id: messageId,
           role: "assistant",
           content,
           createdAt: options?.createdAt ?? existing?.createdAt ?? Date.now(),
-          status: options?.status ?? existing?.status
+          status: options?.status ?? existing?.status,
+          thinking: nextThinking
         };
-        const existingMessage = Boolean(existing);
+        const hasExistingMessage = Boolean(existing);
 
         return {
           ...thread,
-          messages: existingMessage
+          messages: hasExistingMessage
             ? thread.messages.map((message) => (message.id === messageId ? nextMessage : message))
             : [...thread.messages, nextMessage]
         };
@@ -704,6 +741,19 @@ export function WorkspaceLayout() {
     setThemeMode(settings.appearanceMode);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      unloadLoadedOllamaModel();
+    };
+  }, []);
+
+  function changeWorkspaceView(nextView: WorkspaceView) {
+    if (nextView !== "threads" && nextView !== view) {
+      unloadLoadedOllamaModel();
+    }
+    setView(nextView);
+  }
+
   function closeSettings() {
     setView(lastWorkspaceView === "settings" ? "threads" : lastWorkspaceView);
   }
@@ -757,6 +807,53 @@ export function WorkspaceLayout() {
     return request?.ollamaModelName ?? (configuredModelName || null);
   }
 
+  function currentOllamaEndpoint() {
+    return aiModelSettings?.endpoint?.trim() || undefined;
+  }
+
+  async function unloadOllamaModel(model: LoadedOllamaModel) {
+    const request: UnloadOllamaModelRequest = {
+      ollamaModelName: model.name,
+      endpoint: model.endpoint,
+      timeoutMs: 15_000
+    };
+
+    try {
+      await invoke("unload_ollama_model", { request });
+    } catch (error) {
+      console.warn("failed to unload Ollama model", model.name, error);
+    }
+  }
+
+  function queueOllamaModelUnload(model: LoadedOllamaModel) {
+    modelUnloadPromiseRef.current = modelUnloadPromiseRef.current.then(() => unloadOllamaModel(model));
+    return modelUnloadPromiseRef.current;
+  }
+
+  function unloadLoadedOllamaModel() {
+    const loadedModel = loadedOllamaModelRef.current;
+    if (!loadedModel) {
+      return;
+    }
+
+    loadedOllamaModelRef.current = null;
+    void queueOllamaModelUnload(loadedModel);
+  }
+
+  async function prepareOllamaModelForRequest(model: LoadedOllamaModel) {
+    await modelUnloadPromiseRef.current;
+    const loadedModel = loadedOllamaModelRef.current;
+    if (
+      loadedModel &&
+      (loadedModel.name !== model.name || loadedModel.endpoint !== model.endpoint)
+    ) {
+      loadedOllamaModelRef.current = null;
+      await queueOllamaModelUnload(loadedModel);
+    }
+
+    loadedOllamaModelRef.current = model;
+  }
+
   function chatSystemPrompt(context: ComposerContext, targetProject: Project) {
     return [
       "You are Quartz Canvas, a local UI editing assistant.",
@@ -783,7 +880,7 @@ export function WorkspaceLayout() {
       .map((message): ContextBudgetChatTurn => ({
         id: message.id,
         role: message.role === "assistant" ? "assistant" : "user",
-        content: message.content
+        content: chatPromptContentForMessage(message)
       }))
       .filter((message) => message.content.trim().length > 0);
   }
@@ -1056,6 +1153,10 @@ export function WorkspaceLayout() {
 
     try {
       const prompt = buildChatPromptForThread(threadId, instruction, context, targetProject, targetMessageCount);
+      await prepareOllamaModelForRequest({
+        name: ollamaModelName,
+        endpoint: currentOllamaEndpoint()
+      });
       setContextBudgetByThreadId((current) => ({
         ...current,
         [threadId]: prompt.contextBudget
@@ -1063,7 +1164,9 @@ export function WorkspaceLayout() {
       const response = await invoke<GenerateChatResponse>("generate_ollama_chat", {
         request: {
           ollamaModelName,
-          endpoint: aiModelSettings?.endpoint,
+          endpoint: currentOllamaEndpoint(),
+          keepAlive: aiModelSettings?.keepAlive ?? "30s",
+          think: true,
           systemPrompt: prompt.systemPrompt,
           messages: prompt.messages,
           options: {
@@ -1103,7 +1206,8 @@ export function WorkspaceLayout() {
         }
       );
       upsertAssistantMessage(threadId, assistantMessageId, response.content, {
-        status: "ready"
+        status: "ready",
+        thinking: response.thinking
       });
     } catch (error) {
       removeMessage(threadId, assistantMessageId);
@@ -1140,12 +1244,18 @@ export function WorkspaceLayout() {
       ? threads.find((thread) => thread.project === project.name && !thread.archived)
       : null;
     if (projectThread) {
+      if (projectThread.id !== activeThreadId) {
+        unloadLoadedOllamaModel();
+      }
       setActiveThreadId(projectThread.id);
     }
   }
 
   function selectThread(threadId: string) {
     const thread = threads.find((item) => item.id === threadId);
+    if (threadId !== activeThreadId) {
+      unloadLoadedOllamaModel();
+    }
 
     if (thread?.project) {
       const project = projects.find((item) => item.name === thread.project);
@@ -1159,6 +1269,8 @@ export function WorkspaceLayout() {
   }
 
   function createThread(projectId?: string) {
+    unloadLoadedOllamaModel();
+
     const fallbackProject: Project = {
       id: createId("project"),
       name: "quartz-canvas",
@@ -1192,6 +1304,8 @@ export function WorkspaceLayout() {
   }
 
   function createSkillThread(creationSource: SkillCreationSource) {
+    unloadLoadedOllamaModel();
+
     const fallbackProject: Project = {
       id: createId("project"),
       name: "quartz-canvas",
@@ -1233,6 +1347,7 @@ export function WorkspaceLayout() {
   }
 
   function selectMarketplaceModel(selection: MarketplaceModelSelection) {
+    unloadLoadedOllamaModel();
     setMarketplaceModel(selection);
 
     const fallbackProject: Project = {
@@ -1354,6 +1469,9 @@ export function WorkspaceLayout() {
       ];
     });
 
+    if (starterThreadId !== activeThreadId) {
+      unloadLoadedOllamaModel();
+    }
     setActiveProjectId(project.id);
     setActiveThreadId(starterThreadId);
     setView("threads");
@@ -1494,6 +1612,7 @@ export function WorkspaceLayout() {
     );
 
     if (activeThread?.project === project.name) {
+      unloadLoadedOllamaModel();
       setActiveThreadId(fallbackThread?.id ?? null);
     }
   }
@@ -1513,6 +1632,7 @@ export function WorkspaceLayout() {
       setActiveProjectId(nextProjects[0]?.id ?? null);
     }
     if (activeThread?.project === project.name) {
+      unloadLoadedOllamaModel();
       setActiveThreadId(nextThreads.find((thread) => !thread.archived)?.id ?? null);
     }
   }
@@ -1666,6 +1786,7 @@ export function WorkspaceLayout() {
     );
 
     if (activeThreadId === threadId) {
+      unloadLoadedOllamaModel();
       setActiveThreadId(fallbackThread?.id ?? null);
     }
   }
@@ -1682,11 +1803,17 @@ export function WorkspaceLayout() {
           : thread
       )
     );
+    if (threadId !== activeThreadId) {
+      unloadLoadedOllamaModel();
+    }
     setActiveThreadId(threadId);
     setView("threads");
   }
 
   function clearThread(threadId: string) {
+    if (threadId === activeThreadId) {
+      unloadLoadedOllamaModel();
+    }
     setThreads((current) =>
       current.map((thread) =>
         thread.id === threadId
@@ -1794,6 +1921,7 @@ export function WorkspaceLayout() {
         };
       })
     );
+    unloadLoadedOllamaModel();
     setActiveThreadId(threadId);
     setView("threads");
   }
@@ -2014,6 +2142,7 @@ export function WorkspaceLayout() {
           onCreateProject={createProject}
           onNewThread={createThread}
           onOpenSettings={() => {
+            unloadLoadedOllamaModel();
             setSettingsSection("general");
             setView("settings");
           }}
@@ -2029,7 +2158,7 @@ export function WorkspaceLayout() {
           }}
           onToggleProjectPinned={toggleProjectPinned}
           onToggleThreadPinned={toggleThreadPinned}
-          onViewChange={setView}
+          onViewChange={changeWorkspaceView}
           profileImage={user?.image ?? null}
           profileName={profileName}
           profilePlan={profilePlan}
@@ -2068,12 +2197,19 @@ export function WorkspaceLayout() {
                     : null
                 }
                 onAiModelSettingsChange={(settings) => {
+                  unloadLoadedOllamaModel();
                   setAiModelSettings(settings);
                   setChatMode(settings.modelKey === "ternary-bonsai-8b" ? "Bonsai" : "Qwopus");
                 }}
                 onBack={closeSettings}
-                onClearMarketplaceModel={() => setMarketplaceModel(null)}
-                onOpenMarketplace={() => setView("marketplace")}
+                onClearMarketplaceModel={() => {
+                  unloadLoadedOllamaModel();
+                  setMarketplaceModel(null);
+                }}
+                onOpenMarketplace={() => {
+                  unloadLoadedOllamaModel();
+                  setView("marketplace");
+                }}
                 onSettingsChange={handleSettingsChange}
                 section={settingsSection}
               />
@@ -2093,12 +2229,17 @@ export function WorkspaceLayout() {
                 onArchiveThread={archiveThread}
                 onClearThread={clearThread}
                 onChatModeChange={(mode) => {
+                  unloadLoadedOllamaModel();
                   setMarketplaceModel(null);
                   setChatMode(mode);
                 }}
-                onOpenMarketplace={() => setView("marketplace")}
+                onOpenMarketplace={() => {
+                  unloadLoadedOllamaModel();
+                  setView("marketplace");
+                }}
                 onNewThread={createThread}
                 onOpenModels={() => {
+                  unloadLoadedOllamaModel();
                   setSettingsSection("ai-models");
                   setView("settings");
                 }}

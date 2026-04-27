@@ -150,6 +150,9 @@ const storageKey = "quartz-canvas-ai-model-settings-v1";
 const importsStorageKey = "quartz-canvas-ai-model-imports-v1";
 const fallbackModelDirectory = "%USERPROFILE%\\.ollama\\models";
 const contextMarks = [4096, 8192, 16384, 32768, 49152, 65536] as const;
+const defaultMaxOutputTokens = 2048;
+const maxOutputTokenLimit = 4096;
+const legacyLongKeepAliveDefaults = new Set(["10m", "20m", "30m", "45m"]);
 
 const modelDefinitions: readonly ModelDefinition[] = [
   {
@@ -252,9 +255,9 @@ const defaultSettings: AiModelRuntimeSettings = {
   contextWindowTokens: 49152,
   cpuThreads: 8,
   gpuLayers: 52,
-  maxOutputTokens: 4096,
+  maxOutputTokens: defaultMaxOutputTokens,
   temperature: 0.2,
-  keepAlive: "10m",
+  keepAlive: "30s",
   flashAttention: true,
   mmapModel: true,
   mlockModel: false
@@ -316,6 +319,11 @@ function cleanNumber(value: unknown, fallback: number, min: number, max: number)
   return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : fallback;
 }
 
+function cleanKeepAlive(value: unknown) {
+  const keepAlive = cleanString(value, defaultSettings.keepAlive).trim();
+  return keepAlive && !legacyLongKeepAliveDefaults.has(keepAlive) ? keepAlive : defaultSettings.keepAlive;
+}
+
 function isLocalModelKey(value: unknown): value is LocalModelKey {
   return value === "qwopus-glm-18b" || value === "ternary-bonsai-8b";
 }
@@ -368,9 +376,11 @@ function sanitizeSettings(settings: Partial<AiModelRuntimeSettings>): AiModelRun
     ),
     cpuThreads: Math.round(cleanNumber(settings.cpuThreads, defaultSettings.cpuThreads, 1, 32)),
     gpuLayers: Math.round(cleanNumber(settings.gpuLayers, profile.gpuLayers, 0, model.maxGpuLayers)),
-    maxOutputTokens: Math.round(cleanNumber(settings.maxOutputTokens, defaultSettings.maxOutputTokens, 256, 8192)),
+    maxOutputTokens: Math.round(
+      cleanNumber(settings.maxOutputTokens, defaultSettings.maxOutputTokens, 256, maxOutputTokenLimit)
+    ),
     temperature: cleanNumber(settings.temperature, defaultSettings.temperature, 0, 1.5),
-    keepAlive: cleanString(settings.keepAlive, defaultSettings.keepAlive).trim() || defaultSettings.keepAlive,
+    keepAlive: cleanKeepAlive(settings.keepAlive),
     flashAttention: cleanBoolean(settings.flashAttention, defaultSettings.flashAttention),
     mmapModel: cleanBoolean(settings.mmapModel, defaultSettings.mmapModel),
     mlockModel: cleanBoolean(settings.mlockModel, defaultSettings.mlockModel)
@@ -388,22 +398,12 @@ function modelfileFor(settings: AiModelRuntimeSettings) {
   const lines = [
     `FROM "${fromPath}"`,
     `PARAMETER num_ctx ${settings.contextWindowTokens}`,
-    `PARAMETER num_gpu ${settings.gpuLayers}`,
-    `PARAMETER num_thread ${settings.cpuThreads}`,
     `PARAMETER num_predict ${settings.maxOutputTokens}`,
     `PARAMETER temperature ${settings.temperature.toFixed(2)}`,
-    "PARAMETER repeat_penalty 1.18",
-    "PARAMETER repeat_last_n 512",
-    "PARAMETER top_p 0.86",
-    "PARAMETER top_k 40",
     'PARAMETER stop "\\nUser:"',
     'PARAMETER stop "\\nAssistant:"',
     'PARAMETER stop "<|im_start|>"',
-    'PARAMETER stop "<|im_end|>"',
-    settings.flashAttention ? "PARAMETER flash_attn true" : "",
-    settings.mmapModel ? "PARAMETER use_mmap true" : "",
-    settings.mlockModel ? "PARAMETER use_mlock true" : "",
-    `PARAMETER keep_alive ${settings.keepAlive}`
+    'PARAMETER stop "<|im_end|>"'
   ];
 
   return lines.filter(Boolean).join("\n");
@@ -1276,7 +1276,7 @@ export function AiModelsPane({
                 />
                 <RuntimeNumber
                   label="Max output"
-                  max={8192}
+                  max={maxOutputTokenLimit}
                   min={256}
                   onChange={(maxOutputTokens) => updateSettings({ maxOutputTokens })}
                   step={256}

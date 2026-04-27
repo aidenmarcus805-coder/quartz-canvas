@@ -56,6 +56,8 @@ type OllamaChatChunk = Readonly<{
   eval_count?: unknown;
 }>;
 
+const defaultOllamaKeepAlive = "30s";
+
 export function createOllamaProvider(options: OllamaProviderOptions = {}): LocalModelProvider {
   const endpoint = normalizeOllamaEndpoint(options.endpoint ?? OLLAMA_DEFAULT_ENDPOINT);
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -211,10 +213,12 @@ function toOllamaChatBody(
   defaultKeepAlive: string | undefined
 ) {
   const runtime = request.runtimeOptions;
+  const contextWindowTokens = resolvedContextWindowTokens(request);
+  const maxOutputTokens = resolvedMaxOutputTokens(request);
   const options: Record<string, string | number | boolean | readonly string[]> = {
     temperature: request.temperature,
-    num_predict: request.maxOutputTokens,
-    num_ctx: runtime?.contextWindowTokens ?? request.model.contextWindowTokens,
+    num_predict: maxOutputTokens,
+    num_ctx: contextWindowTokens,
     ...(runtime?.gpuLayers === undefined ? {} : { num_gpu: runtime.gpuLayers }),
     ...(runtime?.cpuThreads === undefined ? {} : { num_thread: runtime.cpuThreads }),
     ...(runtime?.stop === undefined ? {} : { stop: runtime.stop }),
@@ -227,7 +231,7 @@ function toOllamaChatBody(
     stream,
     ...(request.responseFormat.type === "json" ? { format: "json" } : {}),
     options,
-    keep_alive: runtime?.keepAlive ?? defaultKeepAlive ?? "10m"
+    keep_alive: runtime?.keepAlive ?? defaultKeepAlive ?? defaultOllamaKeepAlive
   };
 }
 
@@ -239,8 +243,8 @@ function toOllamaMessages(messages: readonly PromptRenderedMessage[]): readonly 
 }
 
 function promptBudgetError(request: LocalModelRequest): AppError | null {
-  const contextWindow = request.runtimeOptions?.contextWindowTokens ?? request.model.contextWindowTokens;
-  const reservedOutput = Math.min(request.maxOutputTokens, contextWindow);
+  const contextWindow = resolvedContextWindowTokens(request);
+  const reservedOutput = resolvedMaxOutputTokens(request);
   const inputBudget = request.inputBudgetTokens ?? Math.max(512, contextWindow - reservedOutput);
   const estimatedInputTokens = estimatePromptTokens(request.messages);
 
@@ -259,6 +263,15 @@ function promptBudgetError(request: LocalModelRequest): AppError | null {
       reservedOutputTokens: reservedOutput
     }
   );
+}
+
+function resolvedContextWindowTokens(request: LocalModelRequest): number {
+  return Math.max(1, Math.floor(request.runtimeOptions?.contextWindowTokens ?? request.model.contextWindowTokens));
+}
+
+function resolvedMaxOutputTokens(request: LocalModelRequest): number {
+  const contextWindow = resolvedContextWindowTokens(request);
+  return Math.max(1, Math.floor(Math.min(request.maxOutputTokens, request.model.maxOutputTokens, contextWindow)));
 }
 
 function estimatePromptTokens(messages: readonly PromptRenderedMessage[]): number {
@@ -288,7 +301,7 @@ function readOllamaModel(model: OllamaListedModel): readonly LocalModelDescripto
       modelId,
       displayName: modelId,
       contextWindowTokens: 8_192,
-      maxOutputTokens: 4_096,
+      maxOutputTokens: 2_048,
       capabilities: ["chat", "streaming", "json_output"],
       runtime: {
         architecture: family,

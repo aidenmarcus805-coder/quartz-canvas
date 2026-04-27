@@ -69,6 +69,7 @@ export type ChatMessage = {
   role: "assistant" | "user" | "tool";
   status?: "working" | "ready" | "failed";
   content: string;
+  thinking?: string;
 };
 
 export type Thread = {
@@ -2264,6 +2265,53 @@ function ActivityMessageRow({
   );
 }
 
+function MessageThinkingDisclosure({ message }: { message: ChatMessage }) {
+  const thinkingId = useId();
+  const thinking = message.thinking?.trim();
+  const [open, setOpen] = useState(() => message.status === "working");
+
+  useEffect(() => {
+    setOpen(message.status === "working");
+  }, [message.id, message.status]);
+
+  if (!thinking) {
+    return null;
+  }
+
+  return (
+    <div className="mb-2 text-[12px] leading-5 text-[var(--text-muted)]">
+      <button
+        aria-controls={thinkingId}
+        aria-expanded={open}
+        className="-ml-1 flex h-6 max-w-full items-center gap-1.5 rounded-[var(--radius-sm)] px-1 text-left transition-[background-color,color] duration-100 ease-out hover:bg-[var(--control-bg-hover)] hover:text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-outer)]"
+        onClick={() => setOpen((current) => !current)}
+        title={open ? "Hide thinking" : "Show thinking"}
+        type="button"
+      >
+        <CaretDown
+          className={[
+            "shrink-0 text-[var(--text-muted)] transition-transform duration-100 ease-out",
+            open ? "rotate-0" : "-rotate-90"
+          ].join(" ")}
+          size={12}
+          weight="regular"
+        />
+        <span className="min-w-0 truncate font-medium text-[var(--text-secondary)]">
+          Thought for a moment
+        </span>
+      </button>
+      {open ? (
+        <div
+          className="mt-1 max-h-[220px] overflow-auto whitespace-pre-wrap border-l border-[var(--border)] pl-3 pr-2 text-[12px] leading-5 text-[var(--text-muted)]"
+          id={thinkingId}
+        >
+          {thinking}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MessageRow({
   message,
   onEditPrompt,
@@ -2293,6 +2341,7 @@ function MessageRow({
           <div className="mb-1 flex justify-end">
             <MessageActions canEdit={false} message={message} onRestoreToMessage={onRestoreToMessage} />
           </div>
+          <MessageThinkingDisclosure message={message} />
           <div className={waiting ? "whitespace-pre-wrap text-[var(--text-muted)]" : "whitespace-pre-wrap"}>
             {message.content}
           </div>

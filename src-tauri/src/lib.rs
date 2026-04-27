@@ -53,6 +53,7 @@ pub fn run() -> tauri::Result<()> {
             commands::ai::plan_qwopus_model_runtime,
             commands::ai::propose_ui_change,
             commands::ai::search_hugging_face_gguf_models,
+            commands::ai::unload_ollama_model,
             commands::auth::get_auth_session,
             commands::auth::open_auth_url,
             commands::auth::sign_out,

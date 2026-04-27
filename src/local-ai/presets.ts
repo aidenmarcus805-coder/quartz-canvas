@@ -117,7 +117,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         providerModelId: "qwopus-glm-18b:q3_k_m",
         ggufFileName: "Qwopus-GLM-18B-Healed-Q3_K_M.gguf",
         contextWindowTokens: 32_768,
-        maxOutputTokens: 4_096
+        maxOutputTokens: 2_048
       }),
       quantizationProfile({
         sourceRepo: QWOPUS_GLM_18B_GGUF_REPO,
@@ -129,7 +129,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         providerModelId: "qwopus-glm-18b:q4_k_m",
         ggufFileName: "Qwopus-GLM-18B-Healed-Q4_K_M.gguf",
         contextWindowTokens: 49_152,
-        maxOutputTokens: 4_096
+        maxOutputTokens: 2_048
       })
     ],
     runtimeRecommendations: [
@@ -144,12 +144,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         runtimeOptions: {
           contextWindowTokens: 32_768,
           gpuLayers: 48,
-          keepAlive: "20m",
-          rawOllamaOptions: {
-            num_batch: 512,
-            use_mmap: true,
-            use_mlock: false
-          }
+          keepAlive: "30s"
         },
         kvCachePlacement: "system_ram",
         cpuSpilloverEnabled: true,
@@ -177,12 +172,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         runtimeOptions: {
           contextWindowTokens: 49_152,
           gpuLayers: 64,
-          keepAlive: "30m",
-          rawOllamaOptions: {
-            num_batch: 512,
-            use_mmap: true,
-            use_mlock: false
-          }
+          keepAlive: "30s"
         },
         kvCachePlacement: "gpu",
         cpuSpilloverEnabled: true,
@@ -209,12 +199,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         runtimeOptions: {
           contextWindowTokens: 65_536,
           gpuLayers: 64,
-          keepAlive: "45m",
-          rawOllamaOptions: {
-            num_batch: 768,
-            use_mmap: true,
-            use_mlock: false
-          }
+          keepAlive: "30s"
         },
         kvCachePlacement: "gpu",
         cpuSpilloverEnabled: true,
@@ -255,7 +240,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         providerModelId: "ternary-bonsai-8b:q2_k",
         ggufFileName: "Ternary-Bonsai-8B-Q2_K.gguf",
         contextWindowTokens: 32_768,
-        maxOutputTokens: 4_096
+        maxOutputTokens: 2_048
       })
     ],
     runtimeRecommendations: [
@@ -268,12 +253,7 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         quantizationId: "q2_k",
         runtimeOptions: {
           contextWindowTokens: 32_768,
-          keepAlive: "20m",
-          rawOllamaOptions: {
-            num_batch: 512,
-            use_mmap: true,
-            use_mlock: false
-          }
+          keepAlive: "30s"
         },
         kvCachePlacement: "gpu",
         cpuSpilloverEnabled: true,
@@ -401,7 +381,7 @@ function quantizationProfile(
       sourceUrl: huggingFaceResolveUrl(profile.sourceRepo, profile.ggufFileName),
       ggufFileName: profile.ggufFileName,
       providerModelId: profile.providerModelId,
-      modelfile: createOllamaModelfile(profile.ggufFileName, profile.contextWindowTokens)
+      modelfile: createOllamaModelfile(profile.ggufFileName, profile.contextWindowTokens, profile.maxOutputTokens)
     }
   };
 }
@@ -451,13 +431,16 @@ function resolveQuantization(
   return quantization ? { entry, quantization } : undefined;
 }
 
-function createOllamaModelfile(ggufFileName: string, contextWindowTokens: number): string {
+function createOllamaModelfile(
+  ggufFileName: string,
+  contextWindowTokens: number,
+  maxOutputTokens: number
+): string {
   return [
     `FROM ./${ggufFileName}`,
     `PARAMETER num_ctx ${contextWindowTokens}`,
-    "PARAMETER num_batch 512",
-    "PARAMETER use_mmap true",
-    "PARAMETER use_mlock false"
+    `PARAMETER num_predict ${maxOutputTokens}`,
+    "PARAMETER temperature 0.2"
   ].join("\n");
 }
 

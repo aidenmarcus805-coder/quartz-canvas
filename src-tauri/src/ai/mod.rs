@@ -6,8 +6,9 @@ pub mod model_runtime;
 pub mod orchestrator;
 
 pub use chat::{
-    generate_ollama_chat_response, ChatGenerationOptions, ChatMessageRequest, ChatRole,
-    GenerateChatResponse, GenerateChatResponseRequest, LocalChatError,
+    generate_ollama_chat_response, unload_ollama_model, ChatGenerationOptions, ChatMessageRequest,
+    ChatRole, GenerateChatResponse, GenerateChatResponseRequest, LocalChatError,
+    UnloadOllamaModelRequest,
 };
 pub use hugging_face::{
     search_hugging_face_gguf_models, validate_hugging_face_gguf_url, HuggingFaceError,
