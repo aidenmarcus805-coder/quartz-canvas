@@ -182,8 +182,8 @@ const paneLimits = {
 
 const localChatDefaults = {
   contextWindowTokens: 32_768,
-  maxOutputTokens: 1_024,
-  maxInteractiveOutputTokens: 2_048,
+  maxOutputTokens: 512,
+  maxInteractiveOutputTokens: 1_024,
   minHistoryTokens: 512,
   promptSafetyMarginTokens: 128
 } as const;
@@ -549,7 +549,7 @@ export function WorkspaceLayout() {
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const currentUrl = urlHistory[urlIndex] ?? "";
   const activeContextBudget = activeThread
-    ? (contextBudgetByThreadId[activeThread.id] ?? estimateContextBudgetForThread(activeThread))
+    ? contextBudgetForThread(activeThread)
     : null;
   const hasPreviewUrl = currentUrl.trim().length > 0;
   const constrainedPaneSizes = constrainPaneSizes(paneSizes.left, paneSizes.chat, sidebarCollapsed);
@@ -761,6 +761,8 @@ export function WorkspaceLayout() {
     return [
       "You are Quartz Canvas, a local UI editing assistant.",
       "Be concise. Do not repeat the user's prompt or your prior response.",
+      "If the user is only chatting, answer in one or two short sentences.",
+      "Never continue by repeating words or phrases to fill the response.",
       "Answer with the next useful action, diagnosis, or exact change. Use short paragraphs or bullets only when they improve scanability.",
       "Do not claim code changes were applied unless Quartz Canvas produced and applied a patch.",
       targetProject.name ? `Project: ${targetProject.name}` : "",
@@ -817,7 +819,8 @@ export function WorkspaceLayout() {
     threadId: string,
     instruction: string,
     context: ComposerContext,
-    targetProject: Project
+    targetProject: Project,
+    messageCount: number
   ): ChatPromptBuild {
     const systemPrompt = chatSystemPrompt(context, targetProject);
     const contextWindowTokens = resolvedChatContextTokens(aiModelSettings);
@@ -845,20 +848,16 @@ export function WorkspaceLayout() {
       })
       .filter((message): message is GenerateChatMessage => Boolean(message));
 
-    const trimmedInstruction = instruction.trim();
-    const promptMessages =
-      trimmedInstruction && !messages.some((message) => message.role === "user")
-        ? [...messages, { role: "user" as const, content: trimmedInstruction }]
-        : messages;
-
     return {
       systemPrompt,
-      messages: promptMessages,
+      messages,
       contextBudget: {
         contextWindowTokens,
-        estimatedUsedTokens: systemPromptTokens + compactedHistory.estimatedTokens,
+        estimatedInputTokens: systemPromptTokens + compactedHistory.estimatedTokens,
         historyCompacted: compactedHistory.compacted,
-        reservedOutputTokens
+        messageCount,
+        reservedOutputTokens,
+        source: "estimate"
       },
       droppedTurnCount: compactedHistory.droppedTurnCount,
       trimmedTurnCount: compactedHistory.trimmedTurnCount
@@ -906,10 +905,25 @@ export function WorkspaceLayout() {
 
     return {
       contextWindowTokens,
-      estimatedUsedTokens: systemPromptTokens + compactedHistory.estimatedTokens,
+      estimatedInputTokens: systemPromptTokens + compactedHistory.estimatedTokens,
       historyCompacted: compactedHistory.compacted,
-      reservedOutputTokens
+      messageCount: thread.messages.length,
+      reservedOutputTokens,
+      source: "estimate"
     };
+  }
+
+  function contextBudgetForThread(thread: Thread): ContextBudgetInfo {
+    const cachedBudget = contextBudgetByThreadId[thread.id];
+
+    if (
+      cachedBudget?.source === "last_request" &&
+      cachedBudget.messageCount === thread.messages.length
+    ) {
+      return cachedBudget;
+    }
+
+    return estimateContextBudgetForThread(thread);
   }
 
   async function ensureModelForSend(
@@ -921,6 +935,7 @@ export function WorkspaceLayout() {
     baseLines: readonly string[],
     context: ComposerContext,
     targetProject: Project,
+    targetMessageCount: number,
     request: EnsureOllamaModelRequest | null
   ) {
     const ollamaModelName = selectedOllamaModelName(request);
@@ -942,7 +957,8 @@ export function WorkspaceLayout() {
         instruction,
         baseLines,
         context,
-        targetProject
+        targetProject,
+        targetMessageCount
       );
       return;
     }
@@ -985,7 +1001,8 @@ export function WorkspaceLayout() {
         instruction,
         baseLines,
         context,
-        targetProject
+        targetProject,
+        targetMessageCount
       );
     } catch (error) {
       const message = readableErrorMessage(error);
@@ -1017,7 +1034,8 @@ export function WorkspaceLayout() {
     instruction: string,
     baseLines: readonly string[],
     context: ComposerContext,
-    targetProject: Project
+    targetProject: Project,
+    targetMessageCount: number
   ) {
     if (!ollamaModelName) {
       removeMessage(threadId, assistantMessageId);
@@ -1037,7 +1055,7 @@ export function WorkspaceLayout() {
     }
 
     try {
-      const prompt = buildChatPromptForThread(threadId, instruction, context, targetProject);
+      const prompt = buildChatPromptForThread(threadId, instruction, context, targetProject, targetMessageCount);
       setContextBudgetByThreadId((current) => ({
         ...current,
         [threadId]: prompt.contextBudget
@@ -1056,13 +1074,15 @@ export function WorkspaceLayout() {
           timeoutMs: 180000
         }
       });
-      const actualPromptTokens = response.promptEvalCount ?? prompt.contextBudget.estimatedUsedTokens;
+      const actualPromptTokens = response.promptEvalCount ?? prompt.contextBudget.estimatedInputTokens;
       const actualResponseTokens = response.evalCount ?? 0;
       setContextBudgetByThreadId((current) => ({
         ...current,
         [threadId]: {
           ...prompt.contextBudget,
-          estimatedUsedTokens: actualPromptTokens + actualResponseTokens
+          actualPromptTokens,
+          actualOutputTokens: actualResponseTokens,
+          source: "last_request"
         }
       }));
 
@@ -1514,6 +1534,8 @@ export function WorkspaceLayout() {
     const activityMessageId = createId("activity");
     const assistantMessageId = createId("assistant");
     const modelRequest = modelEnsureRequest(modelOperationId);
+    const targetThread = threads.find((thread) => thread.id === targetThreadId);
+    const targetMessageCount = (targetThread?.messages.length ?? 0) + 3;
     const fallbackProject: Project = {
       id: createId("project"),
       name: "quartz-canvas",
@@ -1592,6 +1614,7 @@ export function WorkspaceLayout() {
       baseActivityLines,
       context,
       targetProject,
+      targetMessageCount,
       modelRequest
     );
   }

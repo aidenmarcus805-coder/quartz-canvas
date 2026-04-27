@@ -140,9 +140,13 @@ export type ComposerContext = {
 
 export type ContextBudgetInfo = {
   contextWindowTokens: number;
-  estimatedUsedTokens: number;
+  estimatedInputTokens: number;
+  actualPromptTokens?: number | null;
+  actualOutputTokens?: number | null;
   historyCompacted: boolean;
+  messageCount?: number;
   reservedOutputTokens: number;
+  source: "estimate" | "last_request";
 };
 
 export type ApplicationSurfaceKind = "desktop" | "web" | "unknown";
@@ -2169,6 +2173,7 @@ function ActivityMessageRow({
   message: ChatMessage;
   onRestoreToMessage: (messageId: string) => void;
 }) {
+  const detailsId = useId();
   const lines = message.content
     .split("\n")
     .map((line) => line.trim())
@@ -2183,12 +2188,31 @@ function ActivityMessageRow({
     (status === "failed" ? "Stopped" : status === "ready" ? "Ready" : "Working");
   const detailLines = visibleLines.slice(1);
   const elapsed = useElapsedSeconds(message.createdAt, status === "working");
+  const hasDetails = detailLines.length > 0 || hasProgress;
+  const [detailsOpen, setDetailsOpen] = useState(() => status !== "ready" && hasDetails);
+
+  useEffect(() => {
+    setDetailsOpen(status !== "ready" && hasDetails);
+  }, [hasDetails, message.id, status]);
 
   return (
     <div className="group px-6 pt-3">
       <div className="max-w-[430px] text-[12px] leading-5 text-[var(--text-muted)]">
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2">
+          <button
+            aria-controls={hasDetails ? detailsId : undefined}
+            aria-expanded={hasDetails ? detailsOpen : undefined}
+            className={[
+              "flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-sm)] text-left transition-[background-color,color] duration-100 ease-out",
+              hasDetails
+                ? "-ml-1 px-1 hover:bg-[var(--control-bg-hover)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring-outer)]"
+                : "cursor-default"
+            ].join(" ")}
+            disabled={!hasDetails}
+            onClick={() => setDetailsOpen((current) => !current)}
+            title={hasDetails ? (detailsOpen ? "Hide details" : "Show details") : undefined}
+            type="button"
+          >
             {status === "working" ? (
               <Cpu className="shrink-0 animate-pulse text-[var(--text-secondary)]" size={14} weight="regular" />
             ) : status === "failed" ? (
@@ -2200,25 +2224,39 @@ function ActivityMessageRow({
             <span className="shrink-0 tabular-nums text-[11px] text-[var(--text-muted)]">
               {status === "working" ? formatElapsedTime(elapsed) : status}
             </span>
-          </div>
+            {hasDetails ? (
+              <CaretDown
+                className={[
+                  "shrink-0 text-[var(--text-muted)] transition-transform duration-100 ease-out",
+                  detailsOpen ? "rotate-0" : "-rotate-90"
+                ].join(" ")}
+                size={12}
+                weight="regular"
+              />
+            ) : null}
+          </button>
           <MessageActions canEdit={false} message={message} onRestoreToMessage={onRestoreToMessage} />
         </div>
-        {detailLines.length > 0 ? (
-          <div className="mt-1 space-y-0.5 pl-5">
-            {detailLines.map((line, index) => (
-              <div className="grid min-w-0 grid-cols-[10px_minmax(0,1fr)] items-start gap-1.5" key={`${line}-${index}`}>
-                <span className="mt-[9px] h-1 w-1 rounded-full bg-[var(--text-muted)] opacity-70" />
-                <span className="min-w-0 truncate">{line}</span>
+        {hasDetails && detailsOpen ? (
+          <div id={detailsId}>
+            {detailLines.length > 0 ? (
+              <div className="mt-1 space-y-0.5 pl-5">
+                {detailLines.map((line, index) => (
+                  <div className="grid min-w-0 grid-cols-[10px_minmax(0,1fr)] items-start gap-1.5" key={`${line}-${index}`}>
+                    <span className="mt-[9px] h-1 w-1 rounded-full bg-[var(--text-muted)] opacity-70" />
+                    <span className="min-w-0 truncate">{line}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        ) : null}
-        {hasProgress ? (
-          <div className="mt-2 ml-5 h-1 overflow-hidden rounded-full bg-[var(--control-bg-hover)]">
-            <div
-              className="h-full rounded-full bg-[var(--text-primary)] transition-[width] duration-150 ease-out"
-              style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-            />
+            ) : null}
+            {hasProgress ? (
+              <div className="mt-2 ml-5 h-1 overflow-hidden rounded-full bg-[var(--control-bg-hover)]">
+                <div
+                  className="h-full rounded-full bg-[var(--text-primary)] transition-[width] duration-150 ease-out"
+                  style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+                />
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -2412,10 +2450,21 @@ function ContextWindowIndicator({ contextBudget }: { contextBudget?: ContextBudg
     return null;
   }
 
-  const estimatedUsedTokens = tokenCount(contextBudget.estimatedUsedTokens);
+  const estimatedInputTokens = tokenCount(contextBudget.estimatedInputTokens);
+  const actualPromptTokens =
+    contextBudget.actualPromptTokens === null || contextBudget.actualPromptTokens === undefined
+      ? null
+      : tokenCount(contextBudget.actualPromptTokens);
+  const actualOutputTokens =
+    contextBudget.actualOutputTokens === null || contextBudget.actualOutputTokens === undefined
+      ? null
+      : tokenCount(contextBudget.actualOutputTokens);
+  const promptTokens = actualPromptTokens ?? estimatedInputTokens;
+  const generatedTokens = actualOutputTokens ?? 0;
+  const usedTokens = promptTokens + generatedTokens;
   const reservedOutputTokens = tokenCount(contextBudget.reservedOutputTokens);
-  const usedRatio = contextRatio(estimatedUsedTokens, contextWindowTokens);
-  const pressureRatio = contextRatio(estimatedUsedTokens + reservedOutputTokens, contextWindowTokens);
+  const usedRatio = contextRatio(usedTokens, contextWindowTokens);
+  const pressureRatio = contextRatio(promptTokens + reservedOutputTokens, contextWindowTokens);
   const usedPercent = Math.round(usedRatio * 100);
   const ringColor =
     pressureRatio >= 0.9
@@ -2427,7 +2476,8 @@ function ContextWindowIndicator({ contextBudget }: { contextBudget?: ContextBudg
     pressureRatio * 360
   )}deg, var(--border-subtle) 0deg)`;
   const historyLabel = contextBudget.historyCompacted ? "Compacted" : "Not compacted";
-  const summary = `Context ${formatCompactTokens(estimatedUsedTokens)} of ${formatCompactTokens(
+  const sourceLabel = contextBudget.source === "last_request" ? "Last request" : "Estimate";
+  const summary = `${sourceLabel}: ${formatCompactTokens(usedTokens)} of ${formatCompactTokens(
     contextWindowTokens
   )} used, ${formatCompactTokens(reservedOutputTokens)} reserved output, history ${historyLabel.toLowerCase()}.`;
 
@@ -2456,9 +2506,21 @@ function ContextWindowIndicator({ contextBudget }: { contextBudget?: ContextBudg
         <span className="flex items-center justify-between gap-3">
           <span>Used</span>
           <span className="tabular-nums text-[var(--text-primary)]">
-            {formatCompactTokens(estimatedUsedTokens)} / {formatCompactTokens(contextWindowTokens)}
+            {formatCompactTokens(usedTokens)} / {formatCompactTokens(contextWindowTokens)}
           </span>
         </span>
+        <span className="mt-1 flex items-center justify-between gap-3">
+          <span>Source</span>
+          <span className="text-[var(--text-primary)]">{sourceLabel}</span>
+        </span>
+        {actualOutputTokens !== null ? (
+          <span className="mt-1 flex items-center justify-between gap-3">
+            <span>Generated</span>
+            <span className="tabular-nums text-[var(--text-primary)]">
+              {formatCompactTokens(actualOutputTokens)}
+            </span>
+          </span>
+        ) : null}
         <span className="mt-1 flex items-center justify-between gap-3">
           <span>Reserved output</span>
           <span className="tabular-nums text-[var(--text-primary)]">

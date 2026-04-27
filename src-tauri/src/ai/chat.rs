@@ -19,6 +19,23 @@ const DEFAULT_OUTPUT_TOKENS: u32 = 1_024;
 const MIN_CONTEXT_TOKENS: u32 = 512;
 const MAX_CONTEXT_TOKENS: u32 = 65_536;
 const MAX_OUTPUT_TOKENS: u32 = 8_192;
+const DEFAULT_REPEAT_PENALTY: f32 = 1.18;
+const DEFAULT_REPEAT_LAST_N: u32 = 512;
+const DEFAULT_TOP_P: f32 = 0.86;
+const DEFAULT_TOP_K: u32 = 40;
+const MAX_REPEAT_LAST_N: u32 = 8_192;
+const MAX_TOP_K: u32 = 500;
+const MAX_STOP_SEQUENCE_COUNT: usize = 12;
+const MAX_STOP_SEQUENCE_CHARS: usize = 96;
+const DEFAULT_STOP_SEQUENCES: [&str; 7] = [
+    "\nUser:",
+    "\nuser:",
+    "\nAssistant:",
+    "\nassistant:",
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|eot_id|>",
+];
 const MIN_INPUT_BUDGET_TOKENS: usize = 256;
 const PROMPT_SAFETY_MARGIN_TOKENS: usize = 128;
 const COMPACTED_HISTORY_TOKENS: usize = 256;
@@ -58,6 +75,11 @@ pub struct ChatGenerationOptions {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
     pub context_window_tokens: Option<u32>,
+    pub repeat_penalty: Option<f32>,
+    pub repeat_last_n: Option<u32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub stop: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -98,6 +120,16 @@ struct OllamaChatOptions {
     num_predict: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat_last_n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -430,6 +462,11 @@ fn chat_options(options: &ChatGenerationOptions) -> Result<OllamaChatOptions, Lo
         temperature: validate_temperature(options.temperature)?,
         num_predict: Some(max_output_tokens),
         num_ctx: Some(context_window_tokens),
+        repeat_penalty: Some(validate_repeat_penalty(options.repeat_penalty)?),
+        repeat_last_n: Some(validate_repeat_last_n(options.repeat_last_n)?),
+        top_p: Some(validate_top_p(options.top_p)?),
+        top_k: Some(validate_top_k(options.top_k)?),
+        stop: Some(validate_stop_sequences(options.stop.as_deref())?),
     })
 }
 
@@ -467,6 +504,91 @@ fn validate_context_window_tokens(tokens: Option<u32>) -> Result<Option<u32>, Lo
         }
         _ => Ok(tokens),
     }
+}
+
+fn validate_repeat_penalty(value: Option<f32>) -> Result<f32, LocalChatError> {
+    match value {
+        Some(value) if !value.is_finite() || !(0.8..=2.0).contains(&value) => {
+            Err(LocalChatError::InvalidRepeatPenalty { value })
+        }
+        Some(value) => Ok(value),
+        None => Ok(DEFAULT_REPEAT_PENALTY),
+    }
+}
+
+fn validate_repeat_last_n(value: Option<u32>) -> Result<u32, LocalChatError> {
+    match value {
+        Some(0) => Err(LocalChatError::InvalidRepeatLastN {
+            value: 0,
+            maximum: MAX_REPEAT_LAST_N,
+        }),
+        Some(value) if value > MAX_REPEAT_LAST_N => Err(LocalChatError::InvalidRepeatLastN {
+            value,
+            maximum: MAX_REPEAT_LAST_N,
+        }),
+        Some(value) => Ok(value),
+        None => Ok(DEFAULT_REPEAT_LAST_N),
+    }
+}
+
+fn validate_top_p(value: Option<f32>) -> Result<f32, LocalChatError> {
+    match value {
+        Some(value) if !value.is_finite() || !(0.05..=1.0).contains(&value) => {
+            Err(LocalChatError::InvalidTopP { value })
+        }
+        Some(value) => Ok(value),
+        None => Ok(DEFAULT_TOP_P),
+    }
+}
+
+fn validate_top_k(value: Option<u32>) -> Result<u32, LocalChatError> {
+    match value {
+        Some(0) => Err(LocalChatError::InvalidTopK {
+            value: 0,
+            maximum: MAX_TOP_K,
+        }),
+        Some(value) if value > MAX_TOP_K => Err(LocalChatError::InvalidTopK {
+            value,
+            maximum: MAX_TOP_K,
+        }),
+        Some(value) => Ok(value),
+        None => Ok(DEFAULT_TOP_K),
+    }
+}
+
+fn validate_stop_sequences(value: Option<&[String]>) -> Result<Vec<String>, LocalChatError> {
+    let sequences: Vec<String> = match value {
+        Some(value) if !value.is_empty() => value.iter().map(|item| item.trim().to_owned()).collect(),
+        _ => DEFAULT_STOP_SEQUENCES
+            .iter()
+            .map(|item| (*item).to_owned())
+            .collect(),
+    };
+
+    if sequences.len() > MAX_STOP_SEQUENCE_COUNT {
+        return Err(LocalChatError::InvalidStopSequences {
+            reason: format!("too many stop sequences: {}", sequences.len()),
+        });
+    }
+
+    let mut cleaned = Vec::with_capacity(sequences.len());
+    for sequence in sequences {
+        if sequence.is_empty() {
+            return Err(LocalChatError::InvalidStopSequences {
+                reason: "empty stop sequence".to_owned(),
+            });
+        }
+        if sequence.chars().count() > MAX_STOP_SEQUENCE_CHARS {
+            return Err(LocalChatError::InvalidStopSequences {
+                reason: "stop sequence is too long".to_owned(),
+            });
+        }
+        if !cleaned.iter().any(|item| item == &sequence) {
+            cleaned.push(sequence);
+        }
+    }
+
+    Ok(cleaned)
 }
 
 fn normalize_ollama_model_name(name: &str) -> Result<String, LocalChatError> {
@@ -564,6 +686,16 @@ pub enum LocalChatError {
         minimum: u32,
         maximum: u32,
     },
+    #[error("repeat penalty must be finite and within 0.8..=2.0: {value}")]
+    InvalidRepeatPenalty { value: f32 },
+    #[error("repeat last n must be within 1..={maximum}: {value}")]
+    InvalidRepeatLastN { value: u32, maximum: u32 },
+    #[error("top p must be finite and within 0.05..=1.0: {value}")]
+    InvalidTopP { value: f32 },
+    #[error("top k must be within 1..={maximum}: {value}")]
+    InvalidTopK { value: u32, maximum: u32 },
+    #[error("stop sequences are invalid: {reason}")]
+    InvalidStopSequences { reason: String },
     #[error("Ollama chat request timed out after {timeout:?}")]
     RequestTimedOut { timeout: Duration },
     #[error("Ollama chat request failed: {endpoint}")]
@@ -625,6 +757,7 @@ mod tests {
                 temperature: Some(0.2),
                 max_output_tokens: Some(512),
                 context_window_tokens: Some(8192),
+                ..Default::default()
             },
             timeout_ms: None,
         };
@@ -637,6 +770,19 @@ mod tests {
         assert_eq!(built.messages[1].role, "user");
         assert_eq!(built.messages[2].role, "assistant");
         assert_eq!(built.options.num_ctx, Some(8192));
+        assert_eq!(built.options.repeat_penalty, Some(DEFAULT_REPEAT_PENALTY));
+        assert_eq!(built.options.repeat_last_n, Some(DEFAULT_REPEAT_LAST_N));
+        assert_eq!(built.options.top_p, Some(DEFAULT_TOP_P));
+        assert_eq!(built.options.top_k, Some(DEFAULT_TOP_K));
+        assert_eq!(
+            built.options.stop,
+            Some(
+                DEFAULT_STOP_SEQUENCES
+                    .iter()
+                    .map(|item| (*item).to_owned())
+                    .collect()
+            )
+        );
     }
 
     #[test]
@@ -669,6 +815,7 @@ mod tests {
                 temperature: Some(2.1),
                 max_output_tokens: Some(512),
                 context_window_tokens: Some(8192),
+                ..Default::default()
             },
             timeout_ms: None,
         };
@@ -695,6 +842,7 @@ mod tests {
                 temperature: None,
                 max_output_tokens: Some(512),
                 context_window_tokens: Some(MIN_CONTEXT_TOKENS - 1),
+                ..Default::default()
             },
             timeout_ms: None,
         };
@@ -734,6 +882,7 @@ mod tests {
                 temperature: None,
                 max_output_tokens: Some(512),
                 context_window_tokens: Some(2_048),
+                ..Default::default()
             },
             timeout_ms: None,
         };
@@ -782,6 +931,7 @@ mod tests {
                 temperature: None,
                 max_output_tokens: Some(256),
                 context_window_tokens: Some(512),
+                ..Default::default()
             },
             timeout_ms: None,
         };

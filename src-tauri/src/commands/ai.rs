@@ -279,7 +279,12 @@ fn local_chat_error(error: LocalChatError) -> CommandError {
         | LocalChatError::InvalidTimeout { .. }
         | LocalChatError::InvalidTemperature { .. }
         | LocalChatError::InvalidMaxOutputTokens { .. }
-        | LocalChatError::InvalidContextWindowTokens { .. } => {
+        | LocalChatError::InvalidContextWindowTokens { .. }
+        | LocalChatError::InvalidRepeatPenalty { .. }
+        | LocalChatError::InvalidRepeatLastN { .. }
+        | LocalChatError::InvalidTopP { .. }
+        | LocalChatError::InvalidTopK { .. }
+        | LocalChatError::InvalidStopSequences { .. } => {
             CommandError::new(ErrorCode::InvalidRequest, message, true)
         }
         LocalChatError::RequestTimedOut { .. }

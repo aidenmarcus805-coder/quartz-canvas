@@ -528,6 +528,14 @@ fn modelfile_contents(gguf_file_name: &str, context_size_tokens: Option<u32>) ->
     if let Some(context_size_tokens) = context_size_tokens {
         contents.push_str(&format!("PARAMETER num_ctx {context_size_tokens}\n"));
     }
+    contents.push_str("PARAMETER repeat_penalty 1.18\n");
+    contents.push_str("PARAMETER repeat_last_n 512\n");
+    contents.push_str("PARAMETER top_p 0.86\n");
+    contents.push_str("PARAMETER top_k 40\n");
+    contents.push_str("PARAMETER stop \"\\nUser:\"\n");
+    contents.push_str("PARAMETER stop \"\\nAssistant:\"\n");
+    contents.push_str("PARAMETER stop \"<|im_start|>\"\n");
+    contents.push_str("PARAMETER stop \"<|im_end|>\"\n");
     contents
 }
 
@@ -658,7 +666,18 @@ mod tests {
 
         assert_eq!(
             contents,
-            "FROM ./model-Q4_K_M.gguf\nPARAMETER num_ctx 8192\n"
+            concat!(
+                "FROM ./model-Q4_K_M.gguf\n",
+                "PARAMETER num_ctx 8192\n",
+                "PARAMETER repeat_penalty 1.18\n",
+                "PARAMETER repeat_last_n 512\n",
+                "PARAMETER top_p 0.86\n",
+                "PARAMETER top_k 40\n",
+                "PARAMETER stop \"\\nUser:\"\n",
+                "PARAMETER stop \"\\nAssistant:\"\n",
+                "PARAMETER stop \"<|im_start|>\"\n",
+                "PARAMETER stop \"<|im_end|>\"\n"
+            )
         );
     }
 }
