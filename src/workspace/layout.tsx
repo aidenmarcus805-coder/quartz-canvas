@@ -11,7 +11,15 @@ import {
 } from "../local-ai";
 import { readStoredThemeMode, setDocumentThemeMode, type AppThemeMode } from "../styles/theme";
 import topbarLogoUrl from "../styles/logo1Black.png";
-import type { AiModelRuntimeSettings } from "./aiModelsPane";
+import {
+  aiModelSettingsForModelKey,
+  chatModeForAiModelSettings,
+  readStoredAiModelRuntimeSettings,
+  sanitizeAiModelRuntimeSettings,
+  writeStoredAiModelRuntimeSettings,
+  type AiModelRuntimeSettings,
+  type LocalModelKey
+} from "./aiModelsPane";
 import { MarketplacePane, type MarketplaceModelSelection } from "./marketplacePane";
 import {
   BrowserPreviewPane,
@@ -353,9 +361,25 @@ function chatPromptContentForMessage(message: ChatMessage) {
   return message.content;
 }
 
+function readInitialAiModelSettings() {
+  return sanitizeAiModelRuntimeSettings(readStoredAiModelRuntimeSettings());
+}
+
+function localModelKeyForChatMode(mode: ChatMode): LocalModelKey {
+  return mode === "Bonsai" ? "ternary-bonsai-8b" : "qwopus-glm-18b";
+}
+
+function sameAiModelSettings(
+  current: AiModelRuntimeSettings | null,
+  next: AiModelRuntimeSettings
+) {
+  return Boolean(current) && JSON.stringify(current) === JSON.stringify(next);
+}
+
 function marketplaceOllamaModelName(selection: MarketplaceModelSelection) {
-  const repoName = selection.modelId.split("/").pop() ?? selection.modelId;
-  return `${safeOllamaTagPart(repoName, "hf-model")}:${quantizationFromFileName(selection.ggufFileName)}`;
+  const [ownerName, repoName] = selection.modelId.split("/");
+  const repoIdentity = repoName ? `${ownerName}-${repoName}` : selection.modelId;
+  return `${safeOllamaTagPart(repoIdentity, "hf-model")}:${quantizationFromFileName(selection.ggufFileName)}`;
 }
 
 function localhostProjectName(project: LocalhostProjectPreview, rootLabel?: string) {
@@ -549,8 +573,10 @@ export function WorkspaceLayout() {
     readSavedId("quartz-canvas-active-thread")
   );
   const [browserMode, setBrowserMode] = useState<BrowserMode>("interact");
-  const [chatMode, setChatMode] = useState<ChatMode>("Qwopus");
-  const [aiModelSettings, setAiModelSettings] = useState<AiModelRuntimeSettings | null>(null);
+  const [chatMode, setChatMode] = useState<ChatMode>(() => chatModeForAiModelSettings(readInitialAiModelSettings()));
+  const [aiModelSettings, setAiModelSettings] = useState<AiModelRuntimeSettings | null>(() =>
+    readInitialAiModelSettings()
+  );
   const [marketplaceModel, setMarketplaceModel] = useState<MarketplaceModelSelection | null>(null);
   const [contextBudgetByThreadId, setContextBudgetByThreadId] = useState<Record<string, ContextBudgetInfo>>({});
   const [, setLoadState] = useState<LoadState>("idle");
@@ -736,6 +762,12 @@ export function WorkspaceLayout() {
   useEffect(() => {
     setDocumentThemeMode(themeMode);
   }, [themeMode]);
+
+  useEffect(() => {
+    if (aiModelSettings) {
+      writeStoredAiModelRuntimeSettings(aiModelSettings);
+    }
+  }, [aiModelSettings]);
 
   const handleSettingsChange = useCallback((settings: SettingsState) => {
     setThemeMode(settings.appearanceMode);
@@ -2197,9 +2229,15 @@ export function WorkspaceLayout() {
                     : null
                 }
                 onAiModelSettingsChange={(settings) => {
-                  unloadLoadedOllamaModel();
-                  setAiModelSettings(settings);
-                  setChatMode(settings.modelKey === "ternary-bonsai-8b" ? "Bonsai" : "Qwopus");
+                  const nextSettings = sanitizeAiModelRuntimeSettings(settings);
+                  setAiModelSettings((current) => {
+                    if (sameAiModelSettings(current, nextSettings)) {
+                      return current;
+                    }
+                    unloadLoadedOllamaModel();
+                    return nextSettings;
+                  });
+                  setChatMode(chatModeForAiModelSettings(nextSettings));
                 }}
                 onBack={closeSettings}
                 onClearMarketplaceModel={() => {
@@ -2231,7 +2269,9 @@ export function WorkspaceLayout() {
                 onChatModeChange={(mode) => {
                   unloadLoadedOllamaModel();
                   setMarketplaceModel(null);
-                  setChatMode(mode);
+                  const nextSettings = aiModelSettingsForModelKey(localModelKeyForChatMode(mode), aiModelSettings);
+                  setAiModelSettings(nextSettings);
+                  setChatMode(chatModeForAiModelSettings(nextSettings));
                 }}
                 onOpenMarketplace={() => {
                   unloadLoadedOllamaModel();

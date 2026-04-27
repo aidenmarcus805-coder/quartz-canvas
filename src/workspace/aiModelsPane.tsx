@@ -16,7 +16,7 @@ import {
   TERNARY_BONSAI_8B_GGUF_REPO
 } from "../local-ai";
 
-type LocalModelKey = "qwopus-glm-18b" | "ternary-bonsai-8b";
+export type LocalModelKey = "qwopus-glm-18b" | "ternary-bonsai-8b";
 type QuantizationId = "q2_k" | "q3_k_m" | "q4_k_m";
 type HardwareProfileId = "8gb-q2" | "8gb-q3" | "12gb-q4" | "16gb-q4";
 type EndpointStatus = "idle" | "checking" | "reachable" | "unreachable";
@@ -146,7 +146,7 @@ type NativeImportPlan = Readonly<{
   warnings: readonly string[];
 }>;
 
-const storageKey = "quartz-canvas-ai-model-settings-v1";
+export const aiModelSettingsStorageKey = "quartz-canvas-ai-model-settings-v1";
 const importsStorageKey = "quartz-canvas-ai-model-imports-v1";
 const fallbackModelDirectory = "%USERPROFILE%\\.ollama\\models";
 const contextMarks = [4096, 8192, 16384, 32768, 49152, 65536] as const;
@@ -278,7 +278,7 @@ function readStoredSettings(): Partial<AiModelRuntimeSettings> {
   }
 
   try {
-    const saved = window.localStorage.getItem(storageKey);
+    const saved = window.localStorage.getItem(aiModelSettingsStorageKey);
     return saved ? (JSON.parse(saved) as Partial<AiModelRuntimeSettings>) : {};
   } catch {
     return {};
@@ -324,6 +324,44 @@ function cleanKeepAlive(value: unknown) {
   return keepAlive && !legacyLongKeepAliveDefaults.has(keepAlive) ? keepAlive : defaultSettings.keepAlive;
 }
 
+function knownProviderModelIds() {
+  return new Set(
+    modelDefinitions.flatMap((model) =>
+      Object.values(model.recommendedModelId).filter((providerModelId): providerModelId is string =>
+        Boolean(providerModelId)
+      )
+    )
+  );
+}
+
+function defaultProviderModelId(model: ModelDefinition, quantization: QuantizationId) {
+  return model.recommendedModelId[quantization] || defaultSettings.providerModelId;
+}
+
+function sanitizedProviderModelId(
+  requestedProviderModelId: unknown,
+  model: ModelDefinition,
+  quantization: QuantizationId
+) {
+  const requested = cleanString(requestedProviderModelId, "").trim();
+  const expected = defaultProviderModelId(model, quantization);
+
+  if (!requested) {
+    return expected;
+  }
+
+  const referencedBuiltInModel = modelDefinitions.find((item) => requested.includes(item.key));
+  if (referencedBuiltInModel && referencedBuiltInModel.key !== model.key) {
+    return expected;
+  }
+
+  if (knownProviderModelIds().has(requested) && requested !== expected) {
+    return expected;
+  }
+
+  return requested;
+}
+
 function isLocalModelKey(value: unknown): value is LocalModelKey {
   return value === "qwopus-glm-18b" || value === "ternary-bonsai-8b";
 }
@@ -363,10 +401,7 @@ function sanitizeSettings(settings: Partial<AiModelRuntimeSettings>): AiModelRun
     modelKey: model.key,
     hardwareProfileId: profile.id,
     quantization,
-    providerModelId:
-      cleanString(settings.providerModelId, "").trim() ||
-      model.recommendedModelId[quantization] ||
-      defaultSettings.providerModelId,
+    providerModelId: sanitizedProviderModelId(settings.providerModelId, model, quantization),
     endpoint: cleanString(settings.endpoint, OLLAMA_DEFAULT_ENDPOINT).trim() || OLLAMA_DEFAULT_ENDPOINT,
     modelDirectory:
       cleanString(settings.modelDirectory, defaultSettings.modelDirectory).trim() || defaultSettings.modelDirectory,
@@ -385,6 +420,46 @@ function sanitizeSettings(settings: Partial<AiModelRuntimeSettings>): AiModelRun
     mmapModel: cleanBoolean(settings.mmapModel, defaultSettings.mmapModel),
     mlockModel: cleanBoolean(settings.mlockModel, defaultSettings.mlockModel)
   };
+}
+
+export function sanitizeAiModelRuntimeSettings(
+  settings: Partial<AiModelRuntimeSettings>
+): AiModelRuntimeSettings {
+  return sanitizeSettings(settings);
+}
+
+export function readStoredAiModelRuntimeSettings(): Partial<AiModelRuntimeSettings> {
+  return readStoredSettings();
+}
+
+export function writeStoredAiModelRuntimeSettings(settings: AiModelRuntimeSettings) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(aiModelSettingsStorageKey, JSON.stringify(settings));
+}
+
+export function aiModelSettingsForModelKey(
+  modelKey: LocalModelKey,
+  current?: Partial<AiModelRuntimeSettings> | null
+) {
+  const nextModel = modelFor(modelKey);
+  const nextProfile = defaultProfileFor(nextModel);
+
+  return sanitizeSettings({
+    ...current,
+    modelKey,
+    hardwareProfileId: nextProfile.id,
+    quantization: nextProfile.quantization,
+    contextWindowTokens: nextProfile.context,
+    gpuLayers: nextProfile.gpuLayers,
+    providerModelId: defaultProviderModelId(nextModel, nextProfile.quantization)
+  });
+}
+
+export function chatModeForAiModelSettings(settings: Partial<AiModelRuntimeSettings> | null | undefined) {
+  return settings?.modelKey === "ternary-bonsai-8b" ? "Bonsai" : "Qwopus";
 }
 
 function modelfileFor(settings: AiModelRuntimeSettings) {
@@ -920,7 +995,7 @@ export function AiModelsPane({
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      window.localStorage.setItem(storageKey, JSON.stringify(settings));
+      writeStoredAiModelRuntimeSettings(settings);
     }
     onSettingsChange?.(settings);
   }, [onSettingsChange, settings]);
