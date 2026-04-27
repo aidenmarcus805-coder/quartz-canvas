@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quartz Canvas</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #f4f2ec;
+        cursor: default;
+        user-select: none;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .mark {
+        display: grid;
+        width: 104px;
+        height: 64px;
+        place-items: center;
+        opacity: 0;
+        animation: enter 420ms ease-out 90ms forwards;
+      }
+
+      img {
+        display: block;
+        width: 92px;
+        height: auto;
+      }
+
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translateY(4px) scale(0.98);
+        }
+
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+    </style>
+  </head>
+  <body data-tauri-drag-region>
+    <div class="mark" data-tauri-drag-region>
+      <img src="/logo1Black.png" alt="Quartz Canvas" draggable="false" />
+    </div>
+  </body>
+</html>

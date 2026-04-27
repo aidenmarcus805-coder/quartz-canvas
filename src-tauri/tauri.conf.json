@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Quartz Canvas",
+  "version": "0.1.0",
+  "identifier": "com.quartzcanvas.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "splashscreen",
+        "title": "Quartz Canvas",
+        "url": "splash.html",
+        "width": 400,
+        "height": 250,
+        "center": true,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "main",
+        "title": "Quartz Canvas",
+        "url": "/",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["quartz-canvas", "quartz"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico"]
+  }
+}
