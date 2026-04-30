@@ -6,12 +6,17 @@ import type {
 
 export const OLLAMA_PROVIDER_ID = "ollama" as const;
 export const OLLAMA_DEFAULT_ENDPOINT = "http://127.0.0.1:11434" as const;
+export const PRISM_LLAMA_CPP_DEFAULT_ENDPOINT = "http://127.0.0.1:11435" as const;
+export const PRISM_LLAMA_CPP_REPO = "PrismML-Eng/llama.cpp" as const;
+export const PRISM_LLAMA_CPP_RELEASE_URL = "https://github.com/PrismML-Eng/llama.cpp/releases/latest" as const;
 
 export const QWOPUS_GLM_18B_GGUF_REPO = "KyleHessling1/Qwopus-GLM-18B-Merged-GGUF" as const;
-export const TERNARY_BONSAI_8B_GGUF_REPO = "lilyanatia/Ternary-Bonsai-8B-GGUF" as const;
+export const TERNARY_BONSAI_8B_GGUF_REPO = "prism-ml/Ternary-Bonsai-8B-gguf" as const;
 
-export type QuartzLocalModelCatalogId = "qwopus-glm-18b" | "ternary-bonsai-8b";
-export type QuartzLocalModelQuantizationId = "q2_k" | "q3_k_m" | "q4_k_m";
+export const QUARTZ_NANO_UI_MODEL_ID = "quartz-nano-ui" as const;
+
+export type QuartzLocalModelCatalogId = "qwopus-glm-18b" | "quartz-nano-ui" | "ternary-bonsai-8b";
+export type QuartzLocalModelQuantizationId = "q2_0" | "q2_k" | "q3_k_m" | "q4_k_m";
 export type QuartzLocalModelHardwareClass = "8gb_vram" | "12gb_vram" | "16gb_plus_vram";
 export type QuartzLocalModelRuntimeFit = "preferred" | "supported_with_ddr5_spillover" | "below_recommended";
 
@@ -23,6 +28,7 @@ export type LocalModelHardwareProfile = Readonly<{
 
 export type LocalModelOllamaImportMetadata = Readonly<{
   providerId: typeof OLLAMA_PROVIDER_ID;
+  preferredRuntime: "ollama" | "prism_llama_cpp";
   source: "huggingface_gguf";
   sourceRepo: string;
   sourceUrl: string;
@@ -70,6 +76,10 @@ export type LocalModelCatalogEntry = Readonly<{
   parameterSize: string;
   sourceRepo: string;
   capabilities: readonly LocalModelCapability[];
+  preferredRuntime: "ollama" | "prism_llama_cpp";
+  runtimeSourceLabel?: string;
+  runtimeSourceUrl?: string;
+  ollamaCompatible: boolean;
   defaultQuantizationId: QuartzLocalModelQuantizationId;
   quantizations: readonly LocalModelQuantizationProfile[];
   runtimeRecommendations: readonly LocalModelRuntimeRecommendation[];
@@ -94,6 +104,13 @@ const BONSAI_CAPABILITIES = [
   "json_output"
 ] as const satisfies readonly LocalModelCapability[];
 
+const QUARTZ_NANO_CAPABILITIES = [
+  "chat",
+  "streaming",
+  "json_output",
+  "evidence_citations"
+] as const satisfies readonly LocalModelCapability[];
+
 export const QUARTZ_LOCAL_MODEL_CATALOG = [
   {
     id: "qwopus-glm-18b",
@@ -105,6 +122,8 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
     parameterSize: "18B",
     sourceRepo: QWOPUS_GLM_18B_GGUF_REPO,
     capabilities: QWOPUS_CAPABILITIES,
+    preferredRuntime: "ollama",
+    ollamaCompatible: true,
     defaultQuantizationId: "q4_k_m",
     quantizations: [
       quantizationProfile({
@@ -219,6 +238,66 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
     ]
   },
   {
+    id: QUARTZ_NANO_UI_MODEL_ID,
+    providerId: OLLAMA_PROVIDER_ID,
+    displayName: "Quartz Nano UI",
+    shortName: "Nano",
+    description: "Bonsai-derived local UI-design model profile for restrained Quartz Canvas edits.",
+    architecture: "qwen3 / ternary Bonsai",
+    parameterSize: "8B",
+    sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
+    capabilities: QUARTZ_NANO_CAPABILITIES,
+    preferredRuntime: "prism_llama_cpp",
+    runtimeSourceLabel: "PrismML llama.cpp",
+    runtimeSourceUrl: PRISM_LLAMA_CPP_RELEASE_URL,
+    ollamaCompatible: false,
+    defaultQuantizationId: "q2_0",
+    quantizations: [
+      quantizationProfile({
+        sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
+        id: "q2_0",
+        displayName: "Q2_0 - Quartz Nano UI adapter target",
+        ggufQuantization: "Q2_0",
+        quantizationBits: 2,
+        ggufSizeGb: 2.18,
+        providerModelId: "quartz-nano:q2_0",
+        ggufFileName: "Ternary-Bonsai-8B-Q2_0.gguf",
+        contextWindowTokens: 65_536,
+        maxOutputTokens: 900
+      })
+    ],
+    runtimeRecommendations: [
+      {
+        id: "quartz-nano-12gb-vram",
+        displayName: "12 GB VRAM",
+        hardwareClass: "12gb_vram",
+        minimumDedicatedVramGb: 8,
+        minimumRecommendedDdr5Gb: 16,
+        quantizationId: "q2_0",
+        runtimeOptions: {
+          contextWindowTokens: 65_536,
+          gpuLayers: 99,
+          keepAlive: "30s"
+        },
+        kvCachePlacement: "gpu",
+        cpuSpilloverEnabled: true,
+        flashAttentionRecommended: true,
+        notes: [
+          "Uses the official Ternary Bonsai Q2_0 GGUF through the PrismML llama.cpp fork.",
+          "Quartz Nano behavior is UI-design focused; LongRoPE2, DoRAN, and TT-LoRA adapters are later training artifacts, not assumed here."
+        ],
+        llamaServerArgs: [
+          "-m Ternary-Bonsai-8B-Q2_0.gguf",
+          "--ctx-size 65536",
+          "--n-gpu-layers 99",
+          "--host 127.0.0.1",
+          "--port 11435",
+          "--flash-attn on"
+        ]
+      }
+    ]
+  },
+  {
     id: "ternary-bonsai-8b",
     providerId: OLLAMA_PROVIDER_ID,
     displayName: "Ternary Bonsai 8B",
@@ -228,18 +307,22 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
     parameterSize: "8B",
     sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
     capabilities: BONSAI_CAPABILITIES,
-    defaultQuantizationId: "q2_k",
+    preferredRuntime: "prism_llama_cpp",
+    runtimeSourceLabel: "PrismML llama.cpp",
+    runtimeSourceUrl: PRISM_LLAMA_CPP_RELEASE_URL,
+    ollamaCompatible: false,
+    defaultQuantizationId: "q2_0",
     quantizations: [
       quantizationProfile({
         sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
-        id: "q2_k",
-        displayName: "Q2_K - compact ternary GGUF",
-        ggufQuantization: "Q2_K",
+        id: "q2_0",
+        displayName: "Q2_0 - PrismML ternary GGUF",
+        ggufQuantization: "Q2_0",
         quantizationBits: 2,
-        ggufSizeGb: 3.28,
-        providerModelId: "ternary-bonsai-8b:q2_k",
-        ggufFileName: "Ternary-Bonsai-8B-Q2_K.gguf",
-        contextWindowTokens: 32_768,
+        ggufSizeGb: 2.18,
+        providerModelId: "ternary-bonsai-8b:q2_0",
+        ggufFileName: "Ternary-Bonsai-8B-Q2_0.gguf",
+        contextWindowTokens: 65_536,
         maxOutputTokens: 2_048
       })
     ],
@@ -250,21 +333,21 @@ export const QUARTZ_LOCAL_MODEL_CATALOG = [
         hardwareClass: "8gb_vram",
         minimumDedicatedVramGb: 8,
         minimumRecommendedDdr5Gb: 16,
-        quantizationId: "q2_k",
+        quantizationId: "q2_0",
         runtimeOptions: {
-          contextWindowTokens: 32_768,
+          contextWindowTokens: 65_536,
           keepAlive: "30s"
         },
         kvCachePlacement: "gpu",
         cpuSpilloverEnabled: true,
         flashAttentionRecommended: true,
         notes: [
-          "The Q2_K GGUF is small enough for broad 8 GB GPU coverage.",
-          "DDR5 spillover is mainly a safety valve for long context and concurrent creative apps."
+          "The official Q2_0 GGUF requires the PrismML llama.cpp fork until support lands upstream.",
+          "Run Prism llama-server locally and point Quartz Canvas at its loopback endpoint."
         ],
         llamaServerArgs: [
-          "-m Ternary-Bonsai-8B-Q2_K.gguf",
-          "-c 32768",
+          "-m Ternary-Bonsai-8B-Q2_0.gguf",
+          "-c 65536",
           "--flash-attn",
           "--mmap"
         ]
@@ -376,6 +459,8 @@ function quantizationProfile(
     maxOutputTokens: profile.maxOutputTokens,
     importMetadata: {
       providerId: OLLAMA_PROVIDER_ID,
+      preferredRuntime:
+        profile.sourceRepo === TERNARY_BONSAI_8B_GGUF_REPO ? "prism_llama_cpp" : "ollama",
       source: "huggingface_gguf",
       sourceRepo: profile.sourceRepo,
       sourceUrl: huggingFaceResolveUrl(profile.sourceRepo, profile.ggufFileName),
@@ -400,6 +485,10 @@ function toLocalModelDescriptor(
     runtime: {
       sourceRepo: entry.sourceRepo,
       sourceUrl: quantization.importMetadata.sourceUrl,
+      preferredRuntime: entry.preferredRuntime,
+      runtimeSourceLabel: entry.runtimeSourceLabel,
+      runtimeSourceUrl: entry.runtimeSourceUrl,
+      ollamaCompatible: entry.ollamaCompatible,
       architecture: entry.architecture,
       parameterSize: entry.parameterSize,
       ggufQuantization: quantization.ggufQuantization,
@@ -407,7 +496,9 @@ function toLocalModelDescriptor(
       ggufSizeGb: quantization.ggufSizeGb,
       quantizationBits: quantization.quantizationBits,
       recommendedProviderModelId: quantization.providerModelId,
-      installHint: `Create an Ollama Modelfile from ${quantization.ggufFileName}, then create ${quantization.providerModelId}.`
+      installHint: entry.ollamaCompatible
+        ? `Create an Ollama Modelfile from ${quantization.ggufFileName}, then create ${quantization.providerModelId}.`
+        : `Serve ${quantization.ggufFileName} with Prism llama.cpp llama-server, then point Quartz Canvas at that endpoint.`
     }
   };
 }
@@ -440,7 +531,15 @@ function createOllamaModelfile(
     `FROM ./${ggufFileName}`,
     `PARAMETER num_ctx ${contextWindowTokens}`,
     `PARAMETER num_predict ${maxOutputTokens}`,
-    "PARAMETER temperature 0.2"
+    "PARAMETER temperature 0.2",
+    "PARAMETER top_p 0.86",
+    "PARAMETER top_k 40",
+    "PARAMETER repeat_penalty 1.18",
+    "PARAMETER repeat_last_n 512",
+    'PARAMETER stop "\\nUser:"',
+    'PARAMETER stop "\\nAssistant:"',
+    'PARAMETER stop "<|im_start|>"',
+    'PARAMETER stop "<|im_end|>"'
   ].join("\n");
 }
 

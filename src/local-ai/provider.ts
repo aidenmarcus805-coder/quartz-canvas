@@ -14,6 +14,10 @@ export type LocalModelCapability =
 export type LocalModelRuntimeHints = Readonly<{
   sourceRepo?: string;
   sourceUrl?: string;
+  preferredRuntime?: "ollama" | "prism_llama_cpp";
+  runtimeSourceLabel?: string;
+  runtimeSourceUrl?: string;
+  ollamaCompatible?: boolean;
   architecture?: string;
   parameterSize?: string;
   ggufQuantization?: string;

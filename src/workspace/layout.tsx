@@ -7,6 +7,7 @@ import { useAuth } from "../auth/AuthContext";
 import {
   getQuartzLocalModelQuantization,
   getQuartzOllamaImportMetadata,
+  PRISM_LLAMA_CPP_DEFAULT_ENDPOINT,
   type QuartzLocalModelQuantizationId
 } from "../local-ai";
 import { readStoredThemeMode, setDocumentThemeMode, type AppThemeMode } from "../styles/theme";
@@ -30,6 +31,7 @@ import {
   type ChatMode,
   type ChatMessage,
   type ComposerContext,
+  type ComposerModelOption,
   type ContextBudgetInfo,
   type ApplicationSurfaceKind,
   type LoadState,
@@ -49,6 +51,7 @@ import {
   estimateTokenCountFromChars,
   type ContextBudgetChatTurn
 } from "./contextBudget";
+import { localModelBehaviorProfileForKey, localModelPromptForContext } from "../prompting";
 
 type OpenProjectResponse = {
   readonly projectId: string;
@@ -64,6 +67,7 @@ type OpenProjectResponse = {
 type EnsureOllamaModelRequest = {
   readonly ollamaModelName: string;
   readonly huggingFaceUrl: string;
+  readonly endpoint?: string;
   readonly modelDirectory?: string;
   readonly contextSizeTokens?: number;
   readonly operationId: string;
@@ -94,9 +98,22 @@ type GenerateChatResponse = {
   readonly totalDurationNs?: number | null;
 };
 
+type EnsurePrismLlamaServerResponse = {
+  readonly endpoint: string;
+  readonly modelName: string;
+  readonly alreadyRunning: boolean;
+  readonly started: boolean;
+  readonly restarted: boolean;
+  readonly loraAdapterPath?: string | null;
+};
+
 type LoadedOllamaModel = {
   readonly name: string;
   readonly endpoint?: string;
+};
+
+type LoadedPrismRuntime = {
+  readonly endpoint: string;
 };
 
 type UnloadOllamaModelRequest = {
@@ -212,9 +229,38 @@ const localChatDefaults = {
   contextWindowTokens: 32_768,
   maxOutputTokens: 512,
   maxInteractiveOutputTokens: 1_024,
+  maxCasualOutputTokens: 192,
+  maxAssistantHistoryChars: 900,
   minHistoryTokens: 512,
   promptSafetyMarginTokens: 128
 } as const;
+
+const composerModelOptions = [
+  {
+    id: "Qwopus",
+    label: "Qwopus",
+    buttonLabel: "Qwopus",
+    detail: "Qwopus GLM 18B through Ollama",
+    providerModelId: "qwopus-glm-18b:q4_k_m",
+    runtime: "ollama"
+  },
+  {
+    id: "Nano",
+    label: "Quartz Nano",
+    buttonLabel: "Nano",
+    detail: "Quartz Nano through Prism llama.cpp",
+    providerModelId: "quartz-nano:q2_0",
+    runtime: "prism_llama_cpp"
+  },
+  {
+    id: "Bonsai",
+    label: "Bonsai",
+    buttonLabel: "Bonsai 8B",
+    detail: "Ternary Bonsai Q2_0 through Prism llama.cpp",
+    providerModelId: "ternary-bonsai-8b:q2_0",
+    runtime: "prism_llama_cpp"
+  }
+] as const satisfies readonly ComposerModelOption[];
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -358,6 +404,10 @@ function normalizeAssistantThinking(thinking: string | null | undefined) {
 }
 
 function chatPromptContentForMessage(message: ChatMessage) {
+  if (message.role === "assistant" && message.content.length > localChatDefaults.maxAssistantHistoryChars) {
+    return `${message.content.slice(0, localChatDefaults.maxAssistantHistoryChars).trimEnd()}\n[Prior assistant response truncated.]`;
+  }
+
   return message.content;
 }
 
@@ -366,6 +416,10 @@ function readInitialAiModelSettings() {
 }
 
 function localModelKeyForChatMode(mode: ChatMode): LocalModelKey {
+  if (mode === "Nano") {
+    return "quartz-nano-ui";
+  }
+
   return mode === "Bonsai" ? "ternary-bonsai-8b" : "qwopus-glm-18b";
 }
 
@@ -380,6 +434,58 @@ function marketplaceOllamaModelName(selection: MarketplaceModelSelection) {
   const [ownerName, repoName] = selection.modelId.split("/");
   const repoIdentity = repoName ? `${ownerName}-${repoName}` : selection.modelId;
   return `${safeOllamaTagPart(repoIdentity, "hf-model")}:${quantizationFromFileName(selection.ggufFileName)}`;
+}
+
+function shouldRequestThinking(ollamaModelName: string) {
+  return !ollamaModelName.toLowerCase().includes("bonsai");
+}
+
+function shouldUsePrismLlamaCpp(settings: AiModelRuntimeSettings | null, chatMode: ChatMode) {
+  return (
+    settings?.modelKey === "ternary-bonsai-8b" ||
+    settings?.modelKey === "quartz-nano-ui" ||
+    (!settings && (chatMode === "Bonsai" || chatMode === "Nano"))
+  );
+}
+
+function isCasualChatInstruction(instruction: string) {
+  const normalized = instruction.trim().toLowerCase().replace(/[.!?\s]+$/g, "");
+  if (!normalized) {
+    return false;
+  }
+
+  return /^(hi|hello|hey|yo|sup|thanks|thank you|how are you|how is it going|what's up|whats up)$/.test(normalized);
+}
+
+function looksLikeWorkspaceInstruction(instruction: string) {
+  const normalized = instruction.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /\b(app|browser|button|card|chat|color|component|css|design|element|font|layout|model|page|palette|panel|pane|patch|preview|screen|selection|sidebar|spacing|style|tailwind|tauri|theme|toolbar|tsx|typeface|ui|ux|website)\b/.test(normalized);
+}
+
+function prismLoraAdapterPath(settings: AiModelRuntimeSettings | null, chatMode: ChatMode) {
+  const modelKey = settings?.modelKey ?? localModelKeyForChatMode(chatMode);
+  if (modelKey !== "quartz-nano-ui") {
+    return undefined;
+  }
+
+  const adapterPath = settings?.loraAdapterPath?.trim();
+  return adapterPath || undefined;
+}
+
+function shouldIncludeWorkspaceContext(instruction: string, context: ComposerContext) {
+  if (isCasualChatInstruction(instruction)) {
+    return false;
+  }
+
+  if (context.includeSelection || context.attachmentsCount > 0 || context.planMode) {
+    return true;
+  }
+
+  return looksLikeWorkspaceInstruction(instruction);
 }
 
 function localhostProjectName(project: LocalhostProjectPreview, rootLabel?: string) {
@@ -599,6 +705,7 @@ export function WorkspaceLayout() {
   const [activePaneResize, setActivePaneResize] = useState<"left" | "chat" | null>(null);
   const cancelledMessageIdsRef = useRef(new Set<string>());
   const loadedOllamaModelRef = useRef<LoadedOllamaModel | null>(null);
+  const loadedPrismRuntimeRef = useRef<LoadedPrismRuntime | null>(null);
   const modelUnloadPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const modelInstallThreadsRef = useRef(new Map<string, ModelInstallActivityTarget>());
 
@@ -775,13 +882,13 @@ export function WorkspaceLayout() {
 
   useEffect(() => {
     return () => {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     };
   }, []);
 
   function changeWorkspaceView(nextView: WorkspaceView) {
     if (nextView !== "threads" && nextView !== view) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     }
     setView(nextView);
   }
@@ -796,19 +903,24 @@ export function WorkspaceLayout() {
   }
 
   function modelEnsureRequest(operationId: string): EnsureOllamaModelRequest | null {
+    if (shouldUsePrismLlamaCpp(aiModelSettings, chatMode)) {
+      return null;
+    }
+
     if (marketplaceModel?.ggufUrl) {
       return {
         operationId,
         ollamaModelName: marketplaceOllamaModelName(marketplaceModel),
         huggingFaceUrl: marketplaceModel.ggufUrl,
+        endpoint: currentOllamaEndpoint(),
         ...modelDirectoryRequestPart(),
         contextSizeTokens: aiModelSettings?.contextWindowTokens ?? 32_768
       };
     }
 
-    const modelKey = aiModelSettings?.modelKey ?? (chatMode === "Bonsai" ? "ternary-bonsai-8b" : "qwopus-glm-18b");
+    const modelKey = aiModelSettings?.modelKey ?? localModelKeyForChatMode(chatMode);
     const quantization = (aiModelSettings?.quantization ??
-      (modelKey === "ternary-bonsai-8b" ? "q2_k" : "q4_k_m")) as QuartzLocalModelQuantizationId;
+      (modelKey === "ternary-bonsai-8b" || modelKey === "quartz-nano-ui" ? "q2_0" : "q4_k_m")) as QuartzLocalModelQuantizationId;
     const configuredModelName = aiModelSettings?.providerModelId?.trim() ?? "";
     const configuredMetadata = configuredModelName
       ? getQuartzOllamaImportMetadata(configuredModelName, quantization)
@@ -829,6 +941,7 @@ export function WorkspaceLayout() {
       operationId,
       ollamaModelName: providerModelId,
       huggingFaceUrl: metadata.sourceUrl,
+      endpoint: currentOllamaEndpoint(),
       ...modelDirectoryRequestPart(),
       contextSizeTokens: aiModelSettings?.contextWindowTokens ?? quantizationProfile?.contextWindowTokens
     };
@@ -836,11 +949,26 @@ export function WorkspaceLayout() {
 
   function selectedOllamaModelName(request: EnsureOllamaModelRequest | null) {
     const configuredModelName = aiModelSettings?.providerModelId?.trim();
-    return request?.ollamaModelName ?? (configuredModelName || null);
+    if (request?.ollamaModelName) {
+      return request.ollamaModelName;
+    }
+
+    if (configuredModelName) {
+      return configuredModelName;
+    }
+
+    const modelKey = aiModelSettings?.modelKey ?? localModelKeyForChatMode(chatMode);
+    const quantization = (aiModelSettings?.quantization ??
+      (modelKey === "ternary-bonsai-8b" || modelKey === "quartz-nano-ui" ? "q2_0" : "q4_k_m")) as QuartzLocalModelQuantizationId;
+    return getQuartzLocalModelQuantization(modelKey, quantization)?.providerModelId ?? null;
   }
 
   function currentOllamaEndpoint() {
     return aiModelSettings?.endpoint?.trim() || undefined;
+  }
+
+  function currentPrismLlamaEndpoint() {
+    return aiModelSettings?.endpoint?.trim() || PRISM_LLAMA_CPP_DEFAULT_ENDPOINT;
   }
 
   async function unloadOllamaModel(model: LoadedOllamaModel) {
@@ -872,8 +1000,37 @@ export function WorkspaceLayout() {
     void queueOllamaModelUnload(loadedModel);
   }
 
+  async function stopPrismRuntime(runtime: LoadedPrismRuntime) {
+    try {
+      await invoke("stop_prism_llama_server", {
+        request: {
+          endpoint: runtime.endpoint,
+          timeoutMs: 15_000
+        }
+      });
+    } catch (error) {
+      console.warn("failed to stop Prism runtime", runtime.endpoint, error);
+    }
+  }
+
+  function unloadLoadedPrismRuntime() {
+    const loadedRuntime = loadedPrismRuntimeRef.current;
+    if (!loadedRuntime) {
+      return;
+    }
+
+    loadedPrismRuntimeRef.current = null;
+    void stopPrismRuntime(loadedRuntime);
+  }
+
+  function unloadActiveLocalRuntime() {
+    unloadLoadedOllamaModel();
+    unloadLoadedPrismRuntime();
+  }
+
   async function prepareOllamaModelForRequest(model: LoadedOllamaModel) {
     await modelUnloadPromiseRef.current;
+    unloadLoadedPrismRuntime();
     const loadedModel = loadedOllamaModelRef.current;
     if (
       loadedModel &&
@@ -886,22 +1043,33 @@ export function WorkspaceLayout() {
     loadedOllamaModelRef.current = model;
   }
 
-  function chatSystemPrompt(context: ComposerContext, targetProject: Project) {
+  async function preparePrismRuntimeForRequest(endpoint: string) {
+    await modelUnloadPromiseRef.current;
+    const loadedOllama = loadedOllamaModelRef.current;
+    if (loadedOllama) {
+      loadedOllamaModelRef.current = null;
+      await queueOllamaModelUnload(loadedOllama);
+    }
+
+    const loadedPrism = loadedPrismRuntimeRef.current;
+    if (loadedPrism && loadedPrism.endpoint !== endpoint) {
+      loadedPrismRuntimeRef.current = null;
+      await stopPrismRuntime(loadedPrism);
+    }
+  }
+
+  function chatSystemPrompt(context: ComposerContext, targetProject: Project, instruction = "") {
+    const includeWorkspaceContext = shouldIncludeWorkspaceContext(instruction, context);
+    const modelKey = aiModelSettings?.modelKey ?? localModelKeyForChatMode(context.mode);
     return [
-      "You are Quartz Canvas, a local UI editing assistant.",
-      "Be concise. Do not repeat the user's prompt or your prior response.",
-      "If the user is only chatting, answer in one or two short sentences.",
-      "Never continue by repeating words or phrases to fill the response.",
-      "Answer with the next useful action, diagnosis, or exact change. Use short paragraphs or bullets only when they improve scanability.",
-      "Do not claim code changes were applied unless Quartz Canvas produced and applied a patch.",
-      targetProject.name ? `Project: ${targetProject.name}` : "",
-      targetProject.path ? `Project path: ${targetProject.path}` : "",
-      currentUrl ? `Preview URL: ${currentUrl}` : "",
-      context.localModelLabel ? `Local model: ${context.localModelLabel}` : "",
-      context.includeSelection && selectedElement
+      ...localModelPromptForContext(modelKey, includeWorkspaceContext),
+      includeWorkspaceContext && targetProject.name ? `Current project: ${targetProject.name}` : "",
+      includeWorkspaceContext && targetProject.path ? `Current project path: ${targetProject.path}` : "",
+      includeWorkspaceContext && currentUrl ? `Preview URL: ${currentUrl}` : "",
+      includeWorkspaceContext && context.includeSelection && selectedElement
         ? `Selected element: ${selectedElement.tag} ${selectedElement.label} (${selectedElement.source})`
         : "",
-      context.planMode ? "Mode: plan first before implementation." : "Mode: normal chat."
+      context.planMode ? "Plan before implementation." : ""
     ].filter(Boolean).join("\n");
   }
 
@@ -951,9 +1119,15 @@ export function WorkspaceLayout() {
     targetProject: Project,
     messageCount: number
   ): ChatPromptBuild {
-    const systemPrompt = chatSystemPrompt(context, targetProject);
+    const systemPrompt = chatSystemPrompt(context, targetProject, instruction);
     const contextWindowTokens = resolvedChatContextTokens(aiModelSettings);
-    const reservedOutputTokens = resolvedChatOutputTokens(aiModelSettings);
+    const modelKey = aiModelSettings?.modelKey ?? localModelKeyForChatMode(context.mode);
+    const behaviorProfile = localModelBehaviorProfileForKey(modelKey);
+    const includeWorkspaceContext = shouldIncludeWorkspaceContext(instruction, context);
+    const requestedOutputTokens = resolvedChatOutputTokens(aiModelSettings);
+    const reservedOutputTokens = includeWorkspaceContext
+      ? Math.min(requestedOutputTokens, behaviorProfile.defaults.maxOutputTokens)
+      : Math.min(requestedOutputTokens, localChatDefaults.maxCasualOutputTokens);
     const systemPromptTokens = estimateTokenCountFromChars(systemPrompt.length, DEFAULT_CHARS_PER_TOKEN);
     const historyTokenBudget = Math.max(
       localChatDefaults.minHistoryTokens,
@@ -1185,30 +1359,105 @@ export function WorkspaceLayout() {
 
     try {
       const prompt = buildChatPromptForThread(threadId, instruction, context, targetProject, targetMessageCount);
-      await prepareOllamaModelForRequest({
-        name: ollamaModelName,
-        endpoint: currentOllamaEndpoint()
-      });
+      const usePrismLlamaCpp = shouldUsePrismLlamaCpp(aiModelSettings, chatMode);
+      const selectedModelKey = aiModelSettings?.modelKey ?? localModelKeyForChatMode(chatMode);
+      const behaviorProfile = localModelBehaviorProfileForKey(selectedModelKey);
+      const prismEndpoint = usePrismLlamaCpp ? currentPrismLlamaEndpoint() : null;
+      if (usePrismLlamaCpp) {
+        const loraAdapterPath = prismLoraAdapterPath(aiModelSettings, chatMode);
+        await preparePrismRuntimeForRequest(prismEndpoint ?? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT);
+        upsertToolMessage(
+          threadId,
+          activityMessageId,
+          activityMessageContent("working", "Working", [
+            ...baseLines.filter((line) => line !== "Waiting for local model"),
+            "Starting Prism runtime"
+          ]),
+          {
+            kind: "activity",
+            status: "working"
+          }
+        );
+        const runtime = await invoke<EnsurePrismLlamaServerResponse>("ensure_prism_llama_server", {
+          request: {
+            endpoint: prismEndpoint ?? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT,
+            modelKey: selectedModelKey,
+            loraAdapterPath,
+            loraAdapterScale: loraAdapterPath ? 1 : undefined,
+            timeoutMs: 120_000
+          }
+        });
+        loadedPrismRuntimeRef.current = { endpoint: runtime.endpoint };
+        upsertToolMessage(
+          threadId,
+          activityMessageId,
+          activityMessageContent("working", "Working", [
+            ...baseLines.filter((line) => line !== "Waiting for local model"),
+            runtime.restarted
+              ? "Prism runtime restarted"
+              : runtime.started
+                ? "Prism runtime started"
+                : "Prism runtime ready",
+            runtime.modelName,
+            runtime.loraAdapterPath ? "Quartz Nano adapter loaded" : "",
+            "Sending request"
+          ].filter((line): line is string => Boolean(line))),
+          {
+            kind: "activity",
+            status: "working"
+          }
+        );
+      } else {
+        await prepareOllamaModelForRequest({
+          name: ollamaModelName,
+          endpoint: currentOllamaEndpoint()
+        });
+      }
       setContextBudgetByThreadId((current) => ({
         ...current,
         [threadId]: prompt.contextBudget
       }));
-      const response = await invoke<GenerateChatResponse>("generate_ollama_chat", {
-        request: {
-          ollamaModelName,
-          endpoint: currentOllamaEndpoint(),
-          keepAlive: aiModelSettings?.keepAlive ?? "30s",
-          think: true,
-          systemPrompt: prompt.systemPrompt,
-          messages: prompt.messages,
-          options: {
-            temperature: aiModelSettings?.temperature ?? 0.2,
-            maxOutputTokens: prompt.contextBudget.reservedOutputTokens,
-            contextWindowTokens: prompt.contextBudget.contextWindowTokens
-          },
-          timeoutMs: 180000
-        }
-      });
+      const response = usePrismLlamaCpp
+        ? await invoke<GenerateChatResponse>("generate_llama_server_chat", {
+            request: {
+              modelName: ollamaModelName,
+              endpoint: prismEndpoint ?? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT,
+              systemPrompt: prompt.systemPrompt,
+              messages: prompt.messages,
+              historyPrecompacted: true,
+              options: {
+                temperature: aiModelSettings?.temperature ?? behaviorProfile.defaults.temperature,
+                repeatPenalty: behaviorProfile.defaults.repeatPenalty,
+                repeatLastN: behaviorProfile.defaults.repeatLastN,
+                topP: behaviorProfile.defaults.topP,
+                topK: behaviorProfile.defaults.topK,
+                maxOutputTokens: prompt.contextBudget.reservedOutputTokens,
+                contextWindowTokens: prompt.contextBudget.contextWindowTokens
+              },
+              timeoutMs: 180000
+            }
+          })
+        : await invoke<GenerateChatResponse>("generate_ollama_chat", {
+            request: {
+              ollamaModelName,
+              endpoint: currentOllamaEndpoint(),
+              keepAlive: aiModelSettings?.keepAlive ?? "30s",
+              think: shouldRequestThinking(ollamaModelName),
+              systemPrompt: prompt.systemPrompt,
+              messages: prompt.messages,
+              historyPrecompacted: true,
+              options: {
+                temperature: aiModelSettings?.temperature ?? behaviorProfile.defaults.temperature,
+                repeatPenalty: behaviorProfile.defaults.repeatPenalty,
+                repeatLastN: behaviorProfile.defaults.repeatLastN,
+                topP: behaviorProfile.defaults.topP,
+                topK: behaviorProfile.defaults.topK,
+                maxOutputTokens: prompt.contextBudget.reservedOutputTokens,
+                contextWindowTokens: prompt.contextBudget.contextWindowTokens
+              },
+              timeoutMs: 180000
+            }
+          });
       const actualPromptTokens = response.promptEvalCount ?? prompt.contextBudget.estimatedInputTokens;
       const actualResponseTokens = response.evalCount ?? 0;
       setContextBudgetByThreadId((current) => ({
@@ -1277,7 +1526,7 @@ export function WorkspaceLayout() {
       : null;
     if (projectThread) {
       if (projectThread.id !== activeThreadId) {
-        unloadLoadedOllamaModel();
+        unloadActiveLocalRuntime();
       }
       setActiveThreadId(projectThread.id);
     }
@@ -1286,7 +1535,7 @@ export function WorkspaceLayout() {
   function selectThread(threadId: string) {
     const thread = threads.find((item) => item.id === threadId);
     if (threadId !== activeThreadId) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     }
 
     if (thread?.project) {
@@ -1301,7 +1550,7 @@ export function WorkspaceLayout() {
   }
 
   function createThread(projectId?: string) {
-    unloadLoadedOllamaModel();
+    unloadActiveLocalRuntime();
 
     const fallbackProject: Project = {
       id: createId("project"),
@@ -1336,7 +1585,7 @@ export function WorkspaceLayout() {
   }
 
   function createSkillThread(creationSource: SkillCreationSource) {
-    unloadLoadedOllamaModel();
+    unloadActiveLocalRuntime();
 
     const fallbackProject: Project = {
       id: createId("project"),
@@ -1379,7 +1628,7 @@ export function WorkspaceLayout() {
   }
 
   function selectMarketplaceModel(selection: MarketplaceModelSelection) {
-    unloadLoadedOllamaModel();
+    unloadActiveLocalRuntime();
     setMarketplaceModel(selection);
 
     const fallbackProject: Project = {
@@ -1502,7 +1751,7 @@ export function WorkspaceLayout() {
     });
 
     if (starterThreadId !== activeThreadId) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     }
     setActiveProjectId(project.id);
     setActiveThreadId(starterThreadId);
@@ -1644,7 +1893,7 @@ export function WorkspaceLayout() {
     );
 
     if (activeThread?.project === project.name) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
       setActiveThreadId(fallbackThread?.id ?? null);
     }
   }
@@ -1664,7 +1913,7 @@ export function WorkspaceLayout() {
       setActiveProjectId(nextProjects[0]?.id ?? null);
     }
     if (activeThread?.project === project.name) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
       setActiveThreadId(nextThreads.find((thread) => !thread.archived)?.id ?? null);
     }
   }
@@ -1686,6 +1935,7 @@ export function WorkspaceLayout() {
     const activityMessageId = createId("activity");
     const assistantMessageId = createId("assistant");
     const modelRequest = modelEnsureRequest(modelOperationId);
+    const usesNativeRuntime = shouldUsePrismLlamaCpp(aiModelSettings, context.mode);
     const targetThread = threads.find((thread) => thread.id === targetThreadId);
     const targetMessageCount = (targetThread?.messages.length ?? 0) + 3;
     const fallbackProject: Project = {
@@ -1705,7 +1955,7 @@ export function WorkspaceLayout() {
     const baseActivityLines = sendActivityBaseLines({
       context,
       currentUrl,
-      hasModelRequest: Boolean(modelRequest),
+      hasModelRequest: Boolean(modelRequest) || usesNativeRuntime,
       selectedElement
     });
     const activityMessage: ChatMessage = {
@@ -1818,7 +2068,7 @@ export function WorkspaceLayout() {
     );
 
     if (activeThreadId === threadId) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
       setActiveThreadId(fallbackThread?.id ?? null);
     }
   }
@@ -1836,7 +2086,7 @@ export function WorkspaceLayout() {
       )
     );
     if (threadId !== activeThreadId) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     }
     setActiveThreadId(threadId);
     setView("threads");
@@ -1844,7 +2094,7 @@ export function WorkspaceLayout() {
 
   function clearThread(threadId: string) {
     if (threadId === activeThreadId) {
-      unloadLoadedOllamaModel();
+      unloadActiveLocalRuntime();
     }
     setThreads((current) =>
       current.map((thread) =>
@@ -1953,7 +2203,7 @@ export function WorkspaceLayout() {
         };
       })
     );
-    unloadLoadedOllamaModel();
+    unloadActiveLocalRuntime();
     setActiveThreadId(threadId);
     setView("threads");
   }
@@ -2174,7 +2424,7 @@ export function WorkspaceLayout() {
           onCreateProject={createProject}
           onNewThread={createThread}
           onOpenSettings={() => {
-            unloadLoadedOllamaModel();
+            unloadActiveLocalRuntime();
             setSettingsSection("general");
             setView("settings");
           }}
@@ -2234,18 +2484,18 @@ export function WorkspaceLayout() {
                     if (sameAiModelSettings(current, nextSettings)) {
                       return current;
                     }
-                    unloadLoadedOllamaModel();
+                    unloadActiveLocalRuntime();
                     return nextSettings;
                   });
                   setChatMode(chatModeForAiModelSettings(nextSettings));
                 }}
                 onBack={closeSettings}
                 onClearMarketplaceModel={() => {
-                  unloadLoadedOllamaModel();
+                  unloadActiveLocalRuntime();
                   setMarketplaceModel(null);
                 }}
                 onOpenMarketplace={() => {
-                  unloadLoadedOllamaModel();
+                  unloadActiveLocalRuntime();
                   setView("marketplace");
                 }}
                 onSettingsChange={handleSettingsChange}
@@ -2262,24 +2512,25 @@ export function WorkspaceLayout() {
             ) : (
               <ChatPane
                 chatMode={chatMode}
+                composerModels={composerModelOptions}
                 contextBudget={activeContextBudget}
                 marketplaceModelLabel={marketplaceModel ? marketplaceOllamaModelName(marketplaceModel) : null}
                 onArchiveThread={archiveThread}
                 onClearThread={clearThread}
                 onChatModeChange={(mode) => {
-                  unloadLoadedOllamaModel();
+                  unloadActiveLocalRuntime();
                   setMarketplaceModel(null);
                   const nextSettings = aiModelSettingsForModelKey(localModelKeyForChatMode(mode), aiModelSettings);
                   setAiModelSettings(nextSettings);
                   setChatMode(chatModeForAiModelSettings(nextSettings));
                 }}
                 onOpenMarketplace={() => {
-                  unloadLoadedOllamaModel();
+                  unloadActiveLocalRuntime();
                   setView("marketplace");
                 }}
                 onNewThread={createThread}
                 onOpenModels={() => {
-                  unloadLoadedOllamaModel();
+                  unloadActiveLocalRuntime();
                   setSettingsSection("ai-models");
                   setView("settings");
                 }}

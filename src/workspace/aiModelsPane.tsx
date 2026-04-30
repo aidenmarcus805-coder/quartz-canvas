@@ -11,14 +11,17 @@ import {
 import { Switch } from "./switch";
 import {
   OLLAMA_DEFAULT_ENDPOINT,
+  PRISM_LLAMA_CPP_DEFAULT_ENDPOINT,
+  PRISM_LLAMA_CPP_RELEASE_URL,
+  QUARTZ_NANO_UI_MODEL_ID,
   QUARTZ_LOCAL_MODEL_PRESETS,
   QWOPUS_GLM_18B_GGUF_REPO,
   TERNARY_BONSAI_8B_GGUF_REPO
 } from "../local-ai";
 
-export type LocalModelKey = "qwopus-glm-18b" | "ternary-bonsai-8b";
-type QuantizationId = "q2_k" | "q3_k_m" | "q4_k_m";
-type HardwareProfileId = "8gb-q2" | "8gb-q3" | "12gb-q4" | "16gb-q4";
+export type LocalModelKey = "qwopus-glm-18b" | "quartz-nano-ui" | "ternary-bonsai-8b";
+type QuantizationId = "q2_0" | "q2_k" | "q3_k_m" | "q4_k_m";
+type HardwareProfileId = "8gb-q2" | "8gb-q3" | "12gb-q4" | "12gb-nano-q2" | "16gb-q4";
 type EndpointStatus = "idle" | "checking" | "reachable" | "unreachable";
 
 export type AiModelRuntimeSettings = {
@@ -29,6 +32,7 @@ export type AiModelRuntimeSettings = {
   readonly quantization: QuantizationId;
   readonly hardwareProfileId: HardwareProfileId;
   readonly ggufPath: string;
+  readonly loraAdapterPath: string;
   readonly contextWindowTokens: number;
   readonly cpuThreads: number;
   readonly gpuLayers: number;
@@ -72,6 +76,9 @@ type ModelDefinition = {
   readonly family: string;
   readonly parameters: string;
   readonly sourceRepo: string;
+  readonly preferredRuntime: "ollama" | "prism_llama_cpp";
+  readonly runtimeSourceUrl?: string;
+  readonly ollamaCompatible: boolean;
   readonly defaultProfileId: HardwareProfileId;
   readonly maxContext: number;
   readonly maxGpuLayers: number;
@@ -162,6 +169,8 @@ const modelDefinitions: readonly ModelDefinition[] = [
     family: "GLM",
     parameters: "18B",
     sourceRepo: QWOPUS_GLM_18B_GGUF_REPO,
+    preferredRuntime: "ollama",
+    ollamaCompatible: true,
     defaultProfileId: "12gb-q4",
     maxContext: 65536,
     maxGpuLayers: 99,
@@ -175,20 +184,43 @@ const modelDefinitions: readonly ModelDefinition[] = [
     }
   },
   {
+    key: QUARTZ_NANO_UI_MODEL_ID,
+    name: "Quartz Nano UI",
+    shortName: "Nano",
+    family: "Bonsai UI",
+    parameters: "8B",
+    sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
+    preferredRuntime: "prism_llama_cpp",
+    runtimeSourceUrl: PRISM_LLAMA_CPP_RELEASE_URL,
+    ollamaCompatible: false,
+    defaultProfileId: "12gb-nano-q2",
+    maxContext: 65536,
+    maxGpuLayers: 99,
+    recommendedModelId: {
+      q2_0: "quartz-nano:q2_0"
+    },
+    ggufFile: {
+      q2_0: "Ternary-Bonsai-8B-Q2_0.gguf"
+    }
+  },
+  {
     key: "ternary-bonsai-8b",
     name: "Ternary Bonsai 8B",
     shortName: "Bonsai",
     family: "Qwen3",
     parameters: "8B",
     sourceRepo: TERNARY_BONSAI_8B_GGUF_REPO,
+    preferredRuntime: "prism_llama_cpp",
+    runtimeSourceUrl: PRISM_LLAMA_CPP_RELEASE_URL,
+    ollamaCompatible: false,
     defaultProfileId: "8gb-q2",
-    maxContext: 32768,
+    maxContext: 65536,
     maxGpuLayers: 99,
     recommendedModelId: {
-      q2_k: "ternary-bonsai-8b:q2_k"
+      q2_0: "ternary-bonsai-8b:q2_0"
     },
     ggufFile: {
-      q2_k: "Ternary-Bonsai-8B-Q2_K.gguf"
+      q2_0: "Ternary-Bonsai-8B-Q2_0.gguf"
     }
   }
 ];
@@ -231,14 +263,26 @@ const hardwareProfiles: readonly HardwareProfile[] = [
     kvCache: "GPU"
   },
   {
+    id: "12gb-nano-q2",
+    modelKey: QUARTZ_NANO_UI_MODEL_ID,
+    label: "12GB VRAM",
+    quantization: "q2_0",
+    vram: "12GB",
+    dedicatedVramGb: 12,
+    ddr5RamGb: 48,
+    context: 65536,
+    gpuLayers: 99,
+    kvCache: "GPU"
+  },
+  {
     id: "8gb-q2",
     modelKey: "ternary-bonsai-8b",
     label: "8GB VRAM",
-    quantization: "q2_k",
+    quantization: "q2_0",
     vram: "8GB",
     dedicatedVramGb: 8,
     ddr5RamGb: 16,
-    context: 32768,
+    context: 65536,
     gpuLayers: 99,
     kvCache: "GPU"
   }
@@ -252,6 +296,7 @@ const defaultSettings: AiModelRuntimeSettings = {
   quantization: "q4_k_m",
   hardwareProfileId: "12gb-q4",
   ggufPath: "",
+  loraAdapterPath: "",
   contextWindowTokens: 49152,
   cpuThreads: 8,
   gpuLayers: 52,
@@ -363,15 +408,30 @@ function sanitizedProviderModelId(
 }
 
 function isLocalModelKey(value: unknown): value is LocalModelKey {
-  return value === "qwopus-glm-18b" || value === "ternary-bonsai-8b";
+  return value === "qwopus-glm-18b" || value === QUARTZ_NANO_UI_MODEL_ID || value === "ternary-bonsai-8b";
 }
 
 function isHardwareProfileId(value: unknown): value is HardwareProfileId {
-  return value === "8gb-q2" || value === "8gb-q3" || value === "12gb-q4" || value === "16gb-q4";
+  return (
+    value === "8gb-q2" ||
+    value === "8gb-q3" ||
+    value === "12gb-q4" ||
+    value === "12gb-nano-q2" ||
+    value === "16gb-q4"
+  );
 }
 
 function isQuantizationId(value: unknown): value is QuantizationId {
-  return value === "q2_k" || value === "q3_k_m" || value === "q4_k_m";
+  return value === "q2_0" || value === "q2_k" || value === "q3_k_m" || value === "q4_k_m";
+}
+
+function isLegacyPrismLlamaCppEndpoint(endpoint: string) {
+  try {
+    const url = new URL(endpoint);
+    return (url.hostname === "127.0.0.1" || url.hostname === "localhost") && url.port === String(8000 + 33);
+  } catch {
+    return false;
+  }
 }
 
 function modelFor(key: LocalModelKey) {
@@ -395,6 +455,32 @@ function sanitizeSettings(settings: Partial<AiModelRuntimeSettings>): AiModelRun
   const profile = requestedProfile.modelKey === model.key ? requestedProfile : defaultProfileFor(model);
   const requestedQuantization = isQuantizationId(settings.quantization) ? settings.quantization : profile.quantization;
   const quantization = model.recommendedModelId[requestedQuantization] ? requestedQuantization : profile.quantization;
+  const runtimeDefaultEndpoint = modelUsesPrismLlamaCpp(model) ? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT : OLLAMA_DEFAULT_ENDPOINT;
+  const oppositeRuntimeDefaultEndpoint = modelUsesPrismLlamaCpp(model)
+    ? OLLAMA_DEFAULT_ENDPOINT
+    : PRISM_LLAMA_CPP_DEFAULT_ENDPOINT;
+  const requestedEndpoint = cleanString(settings.endpoint, runtimeDefaultEndpoint).trim();
+  const endpoint =
+    requestedEndpoint &&
+    requestedEndpoint !== oppositeRuntimeDefaultEndpoint &&
+    !isLegacyPrismLlamaCppEndpoint(requestedEndpoint)
+      ? requestedEndpoint
+      : runtimeDefaultEndpoint;
+  const requestedContextWindowTokens = cleanNumber(settings.contextWindowTokens, profile.context, 4096, model.maxContext);
+  const contextWindowTokens =
+    model.key === QUARTZ_NANO_UI_MODEL_ID && requestedContextWindowTokens === 8192
+      ? profile.context
+      : requestedContextWindowTokens;
+  const requestedMaxOutputTokens = cleanNumber(
+    settings.maxOutputTokens,
+    defaultSettings.maxOutputTokens,
+    256,
+    maxOutputTokenLimit
+  );
+  const maxOutputTokens =
+    model.key === QUARTZ_NANO_UI_MODEL_ID && requestedMaxOutputTokens === defaultSettings.maxOutputTokens
+      ? 640
+      : requestedMaxOutputTokens;
 
   return {
     ...defaultSettings,
@@ -402,18 +488,16 @@ function sanitizeSettings(settings: Partial<AiModelRuntimeSettings>): AiModelRun
     hardwareProfileId: profile.id,
     quantization,
     providerModelId: sanitizedProviderModelId(settings.providerModelId, model, quantization),
-    endpoint: cleanString(settings.endpoint, OLLAMA_DEFAULT_ENDPOINT).trim() || OLLAMA_DEFAULT_ENDPOINT,
+    endpoint,
     modelDirectory:
       cleanString(settings.modelDirectory, defaultSettings.modelDirectory).trim() || defaultSettings.modelDirectory,
     ggufPath: cleanString(settings.ggufPath, "").trim(),
-    contextWindowTokens: Math.round(
-      cleanNumber(settings.contextWindowTokens, profile.context, 4096, model.maxContext)
-    ),
+    loraAdapterPath:
+      model.key === QUARTZ_NANO_UI_MODEL_ID ? cleanString(settings.loraAdapterPath, "").trim() : "",
+    contextWindowTokens: Math.round(contextWindowTokens),
     cpuThreads: Math.round(cleanNumber(settings.cpuThreads, defaultSettings.cpuThreads, 1, 32)),
     gpuLayers: Math.round(cleanNumber(settings.gpuLayers, profile.gpuLayers, 0, model.maxGpuLayers)),
-    maxOutputTokens: Math.round(
-      cleanNumber(settings.maxOutputTokens, defaultSettings.maxOutputTokens, 256, maxOutputTokenLimit)
-    ),
+    maxOutputTokens: Math.round(maxOutputTokens),
     temperature: cleanNumber(settings.temperature, defaultSettings.temperature, 0, 1.5),
     keepAlive: cleanKeepAlive(settings.keepAlive),
     flashAttention: cleanBoolean(settings.flashAttention, defaultSettings.flashAttention),
@@ -454,12 +538,22 @@ export function aiModelSettingsForModelKey(
     quantization: nextProfile.quantization,
     contextWindowTokens: nextProfile.context,
     gpuLayers: nextProfile.gpuLayers,
+    maxOutputTokens: nextModel.key === QUARTZ_NANO_UI_MODEL_ID ? 640 : defaultMaxOutputTokens,
+    temperature: nextModel.key === QUARTZ_NANO_UI_MODEL_ID ? 0.15 : defaultSettings.temperature,
+    endpoint: modelUsesPrismLlamaCpp(nextModel) ? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT : OLLAMA_DEFAULT_ENDPOINT,
     providerModelId: defaultProviderModelId(nextModel, nextProfile.quantization)
   });
 }
 
 export function chatModeForAiModelSettings(settings: Partial<AiModelRuntimeSettings> | null | undefined) {
+  if (settings?.modelKey === QUARTZ_NANO_UI_MODEL_ID) {
+    return "Nano";
+  }
   return settings?.modelKey === "ternary-bonsai-8b" ? "Bonsai" : "Qwopus";
+}
+
+function modelUsesPrismLlamaCpp(model: ModelDefinition) {
+  return model.preferredRuntime === "prism_llama_cpp";
 }
 
 function modelfileFor(settings: AiModelRuntimeSettings) {
@@ -468,6 +562,7 @@ function modelfileFor(settings: AiModelRuntimeSettings) {
     settings.ggufPath.trim() ||
     model.ggufFile[settings.quantization] ||
     model.ggufFile.q4_k_m ||
+    model.ggufFile.q2_0 ||
     model.ggufFile.q2_k ||
     "";
   const lines = [
@@ -475,6 +570,10 @@ function modelfileFor(settings: AiModelRuntimeSettings) {
     `PARAMETER num_ctx ${settings.contextWindowTokens}`,
     `PARAMETER num_predict ${settings.maxOutputTokens}`,
     `PARAMETER temperature ${settings.temperature.toFixed(2)}`,
+    "PARAMETER top_p 0.86",
+    "PARAMETER top_k 40",
+    "PARAMETER repeat_penalty 1.18",
+    "PARAMETER repeat_last_n 512",
     'PARAMETER stop "\\nUser:"',
     'PARAMETER stop "\\nAssistant:"',
     'PARAMETER stop "<|im_start|>"',
@@ -486,6 +585,16 @@ function modelfileFor(settings: AiModelRuntimeSettings) {
 
 function commandFor(settings: AiModelRuntimeSettings) {
   const model = modelFor(settings.modelKey);
+  if (modelUsesPrismLlamaCpp(model)) {
+    const modelPath = settings.ggufPath.trim() || model.ggufFile[settings.quantization] || "Ternary-Bonsai-8B-Q2_0.gguf";
+    const loraArg = settings.loraAdapterPath.trim() ? ` --lora "${settings.loraAdapterPath.trim()}"` : "";
+    return [
+      `# ${model.sourceRepo}`,
+      `# Runtime: ${model.runtimeSourceUrl ?? PRISM_LLAMA_CPP_RELEASE_URL}`,
+      `llama-server -m "${modelPath}"${loraArg} --ctx-size ${settings.contextWindowTokens} --n-gpu-layers ${settings.gpuLayers} --host 127.0.0.1 --port 11435 --flash-attn on`
+    ].join("\n");
+  }
+
   const modelfileName = `Modelfile.${model.shortName.toLowerCase()}.${settings.quantization}`;
   return [
     `# ${model.sourceRepo}`,
@@ -503,8 +612,17 @@ function formatTokens(tokens: number) {
 
 function modelPresetHint(modelKey: LocalModelKey) {
   const selected = modelFor(modelKey);
-  const preset = QUARTZ_LOCAL_MODEL_PRESETS.find((item) => item.runtime?.sourceRepo === selected.sourceRepo);
-  return preset?.runtime?.recommendedProviderModelId ?? selected.recommendedModelId.q4_k_m ?? selected.recommendedModelId.q2_k ?? "";
+  const recommendedProviderModelId =
+    selected.recommendedModelId.q4_k_m ??
+    selected.recommendedModelId.q3_k_m ??
+    selected.recommendedModelId.q2_0 ??
+    selected.recommendedModelId.q2_k ??
+    "";
+  const preset = QUARTZ_LOCAL_MODEL_PRESETS.find((item) => item.modelId === recommendedProviderModelId);
+  return (
+    preset?.runtime?.recommendedProviderModelId ??
+    recommendedProviderModelId
+  );
 }
 
 function isLoopbackEndpoint(endpoint: string) {
@@ -522,6 +640,16 @@ function isLoopbackEndpoint(endpoint: string) {
 function nativeErrorMessage(error: unknown, fallback: string) {
   const message = error instanceof Error ? error.message : "";
   return message.toLowerCase().includes("invoke") ? fallback : message || fallback;
+}
+
+function installedModelName(item: { readonly id?: unknown; readonly model?: unknown; readonly name?: unknown }) {
+  if (typeof item.id === "string") {
+    return item.id;
+  }
+  if (typeof item.model === "string") {
+    return item.model;
+  }
+  return typeof item.name === "string" ? item.name : "";
 }
 
 function Section({
@@ -832,6 +960,7 @@ export function AiModelsPane({
   const quantizationOptions = useMemo(
     () =>
       [
+        model.recommendedModelId.q2_0 ? { label: "Q2_0", value: "q2_0" as const } : null,
         model.recommendedModelId.q2_k ? { label: "Q2_K", value: "q2_k" as const } : null,
         model.recommendedModelId.q3_k_m ? { label: "Q3_K_M", value: "q3_k_m" as const } : null,
         model.recommendedModelId.q4_k_m ? { label: "Q4_K_M", value: "q4_k_m" as const } : null
@@ -868,6 +997,10 @@ export function AiModelsPane({
       quantization: nextProfile.quantization,
       contextWindowTokens: nextProfile.context,
       gpuLayers: nextProfile.gpuLayers,
+      endpoint:
+        nextModel.preferredRuntime === "prism_llama_cpp"
+          ? PRISM_LLAMA_CPP_DEFAULT_ENDPOINT
+          : OLLAMA_DEFAULT_ENDPOINT,
       providerModelId: nextModel.recommendedModelId[nextProfile.quantization] ?? ""
     });
   }
@@ -904,22 +1037,26 @@ export function AiModelsPane({
 
     try {
       const endpoint = settings.endpoint.replace(/\/+$/, "");
-      const response = await fetch(`${endpoint}/api/tags`);
+      const prismRuntime = modelUsesPrismLlamaCpp(model);
+      const response = await fetch(`${endpoint}${prismRuntime ? "/v1/models" : "/api/tags"}`);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const payload = (await response.json()) as { models?: readonly { name?: unknown; model?: unknown }[] };
+      const payload = (await response.json()) as {
+        data?: readonly { id?: unknown }[];
+        models?: readonly { name?: unknown; model?: unknown }[];
+      };
       setInstalledModels(
-        (payload.models ?? [])
-          .map((item) => (typeof item.model === "string" ? item.model : typeof item.name === "string" ? item.name : ""))
+        (prismRuntime ? (payload.data ?? []) : (payload.models ?? []))
+          .map(installedModelName)
           .filter(Boolean)
       );
       setEndpointStatus("reachable");
-      setLastAction("Ollama connected");
+      setLastAction(prismRuntime ? "Prism llama.cpp connected" : "Ollama connected");
     } catch {
       setEndpointStatus("unreachable");
       setInstalledModels([]);
-      setLastAction("Ollama unreachable");
+      setLastAction(modelUsesPrismLlamaCpp(model) ? "Prism llama.cpp unreachable" : "Ollama unreachable");
     }
   }
 
@@ -1121,9 +1258,12 @@ export function AiModelsPane({
                 </div>
               </Row>
             ) : null}
-            <Row label="Provider tag" detail="Ollama tag used by chat">
+            <Row
+              label={modelUsesPrismLlamaCpp(model) ? "Server model" : "Provider tag"}
+              detail={modelUsesPrismLlamaCpp(model) ? "Prism llama-server model name" : "Ollama tag used by chat"}
+            >
               <input
-                aria-label="Ollama provider tag"
+                aria-label={modelUsesPrismLlamaCpp(model) ? "llama-server model name" : "Ollama provider tag"}
                 className={`${inputClass} w-[320px] max-w-full`}
                 onChange={(event) => updateProviderModelId(event.target.value)}
                 spellCheck={false}
@@ -1133,7 +1273,9 @@ export function AiModelsPane({
             <Row label="Downloaded models">
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2 max-[820px]:justify-start">
                 <span className="min-w-0 truncate text-[11px] text-[var(--text-muted)]">
-                  Download GGUF models from Hugging Face, then use their Ollama tag here.
+                  {modelUsesPrismLlamaCpp(model)
+                    ? "Download the official GGUF, serve it with Prism llama.cpp, then point chat at that server."
+                    : "Download GGUF models from Hugging Face, then use their Ollama tag here."}
                 </span>
                 {onOpenMarketplace ? (
                   <button className={controlClass} onClick={onOpenMarketplace} type="button">
@@ -1146,7 +1288,7 @@ export function AiModelsPane({
               </div>
             </Row>
             {installedModels.length > 0 ? (
-              <Row label="Installed Ollama tags">
+              <Row label={modelUsesPrismLlamaCpp(model) ? "Server models" : "Installed Ollama tags"}>
                 <div className="flex min-w-0 flex-1 flex-wrap justify-end gap-1.5 max-[820px]:justify-start">
                   {installedModels.slice(0, 6).map((installed) => (
                     <button
@@ -1164,10 +1306,10 @@ export function AiModelsPane({
           </Section>
 
           <Section title="Local runtime">
-            <Row label="Ollama endpoint">
+            <Row label={modelUsesPrismLlamaCpp(model) ? "Prism endpoint" : "Ollama endpoint"}>
               <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 max-[640px]:grid-cols-[minmax(0,1fr)_auto]">
                 <input
-                  aria-label="Ollama endpoint"
+                  aria-label={modelUsesPrismLlamaCpp(model) ? "Prism llama.cpp endpoint" : "Ollama endpoint"}
                   className={`${inputClass} w-full`}
                   onChange={(event) => updateSettings({ endpoint: event.target.value })}
                   spellCheck={false}
@@ -1225,6 +1367,18 @@ export function AiModelsPane({
                 </button>
               </div>
             </Row>
+            {settings.modelKey === QUARTZ_NANO_UI_MODEL_ID ? (
+              <Row label="LoRA adapter">
+                <input
+                  aria-label="Quartz Nano LoRA adapter GGUF path"
+                  className={`${inputClass} min-w-0 flex-1`}
+                  onChange={(event) => updateSettings({ loraAdapterPath: event.target.value })}
+                  placeholder="Optional override; Quartz Nano uses the default adapter when present"
+                  spellCheck={false}
+                  value={settings.loraAdapterPath}
+                />
+              </Row>
+            ) : null}
             {matchingImports.length > 0 ? (
               <Row label="Recent imports">
                 <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -1395,11 +1549,13 @@ export function AiModelsPane({
                         : "No local GGUF imported"}
                   </div>
                 </Row>
-                <Row label="Ollama output">
+                <Row label={modelUsesPrismLlamaCpp(model) ? "Server command" : "Ollama output"}>
                   <div className="flex min-w-0 flex-1 justify-end gap-1.5 max-[820px]:justify-start">
+                    {!modelUsesPrismLlamaCpp(model) ? (
                     <button className={controlClass} onClick={() => void copyText(modelfile, "Modelfile")} type="button">
                       Copy Modelfile
                     </button>
+                    ) : null}
                     <button className={controlClass} onClick={() => void copyText(command, "Command")} type="button">
                       Copy command
                     </button>

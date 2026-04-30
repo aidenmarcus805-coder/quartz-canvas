@@ -8,8 +8,12 @@ use thiserror::Error;
 
 pub const QWOPUS_MODEL_ID: &str = "qwopus-glm-18b";
 pub const QWOPUS_GLM_18B_REPO: &str = "KyleHessling1/Qwopus-GLM-18B-Merged-GGUF";
+pub const PRISM_LLAMA_CPP_REPO: &str = "PrismML-Eng/llama.cpp";
+pub const PRISM_LLAMA_CPP_RELEASE_URL: &str =
+    "https://github.com/PrismML-Eng/llama.cpp/releases/latest";
+pub const QUARTZ_NANO_MODEL_ID: &str = "quartz-nano-ui";
 pub const TERNARY_BONSAI_8B_MODEL_ID: &str = "ternary-bonsai-8b";
-pub const TERNARY_BONSAI_8B_REPO: &str = "lilyanatia/Ternary-Bonsai-8B-GGUF";
+pub const TERNARY_BONSAI_8B_REPO: &str = "prism-ml/Ternary-Bonsai-8B-gguf";
 pub const TERNARY_BONSAI_4B_MODEL_ID: &str = "ternary-bonsai-4b";
 pub const TERNARY_BONSAI_4B_REPO: &str = "prism-ml/Ternary-Bonsai-4B-gguf";
 pub const TERNARY_BONSAI_17B_MODEL_ID: &str = "ternary-bonsai-1.7b";
@@ -215,6 +219,7 @@ pub fn plan_qwopus_runtime(
 pub fn model_profile_catalog() -> Vec<AiModelProfile> {
     vec![
         qwopus_profile(),
+        quartz_nano_profile(),
         bonsai_8b_profile(),
         bonsai_4b_profile(),
         bonsai_17b_profile(),
@@ -226,18 +231,32 @@ pub fn plan_local_model_runtime(
 ) -> Result<LocalModelRuntimePlan, ModelPlanningError> {
     match request.model_id.trim() {
         QWOPUS_MODEL_ID => plan_qwopus_local_runtime(request),
+        QUARTZ_NANO_MODEL_ID => plan_bonsai_runtime(
+            request,
+            BonsaiSpec {
+                model_id: QUARTZ_NANO_MODEL_ID,
+                display_name: "Quartz Nano UI",
+                repo: TERNARY_BONSAI_8B_REPO,
+                model_file: "Ternary-Bonsai-8B-Q2_0.gguf",
+                gguf_size_gb: 2.18,
+                context_size_tokens: 65_536,
+                minimum_recommended_ddr5_gb: 16,
+                quantization: QuantizationTier::Q20,
+                ollama_supported: false,
+            },
+        ),
         TERNARY_BONSAI_8B_MODEL_ID => plan_bonsai_runtime(
             request,
             BonsaiSpec {
                 model_id: TERNARY_BONSAI_8B_MODEL_ID,
                 display_name: "Ternary Bonsai 8B",
                 repo: TERNARY_BONSAI_8B_REPO,
-                model_file: "Ternary-Bonsai-8B-Q2_K.gguf",
-                gguf_size_gb: 3.25,
-                context_size_tokens: 32_768,
+                model_file: "Ternary-Bonsai-8B-Q2_0.gguf",
+                gguf_size_gb: 2.18,
+                context_size_tokens: 65_536,
                 minimum_recommended_ddr5_gb: 16,
-                quantization: QuantizationTier::Q2K,
-                ollama_supported: true,
+                quantization: QuantizationTier::Q20,
+                ollama_supported: false,
             },
         ),
         TERNARY_BONSAI_4B_MODEL_ID => plan_bonsai_runtime(
@@ -486,18 +505,43 @@ fn qwopus_profile() -> AiModelProfile {
     }
 }
 
+fn quartz_nano_profile() -> AiModelProfile {
+    let mut profile = bonsai_profile(
+        QUARTZ_NANO_MODEL_ID,
+        "Quartz Nano UI",
+        TERNARY_BONSAI_8B_REPO,
+        "Ternary-Bonsai-8B-Q2_0.gguf",
+        2.18,
+        65_536,
+        8,
+        16,
+        QuantizationTier::Q20,
+        false,
+    );
+    profile.recommended_use =
+        "Quartz UI-design adapter target over Ternary Bonsai 8B for restrained local UI edits."
+            .to_owned();
+    profile.notes = vec![
+        "Quartz Nano is produced by the external adapter training pipeline under Documents/quartz-nano."
+            .to_owned(),
+        "The served base context remains the Bonsai 65,536 token ceiling until a trained long-context artifact exists."
+            .to_owned(),
+    ];
+    profile
+}
+
 fn bonsai_8b_profile() -> AiModelProfile {
     bonsai_profile(
         TERNARY_BONSAI_8B_MODEL_ID,
         "Ternary Bonsai 8B",
         TERNARY_BONSAI_8B_REPO,
-        "Ternary-Bonsai-8B-Q2_K.gguf",
-        3.25,
-        32_768,
-        4,
+        "Ternary-Bonsai-8B-Q2_0.gguf",
+        2.18,
+        65_536,
+        0,
         16,
-        QuantizationTier::Q2K,
-        true,
+        QuantizationTier::Q20,
+        false,
     )
 }
 
@@ -549,11 +593,8 @@ fn bonsai_profile(
         family: "Ternary Bonsai / Qwen3".to_owned(),
         repo: repo.to_owned(),
         license: "Apache-2.0".to_owned(),
-        recommended_use: if quantization == QuantizationTier::Q2K {
-            "Compact Q2_K GGUF for fast local drafting and lower-memory systems.".to_owned()
-        } else {
-            "Small, fast local experimentation when Q2_0 runtime support is available.".to_owned()
-        },
+        recommended_use: "Small, fast local experimentation through Prism llama.cpp Q2_0 support."
+            .to_owned(),
         quantizations: vec![quant_option(
             quantization,
             model_file,
@@ -809,17 +850,13 @@ fn plan_bonsai_runtime(
         });
     }
 
-    let mut notes = if spec.quantization == QuantizationTier::Q2K {
-        vec!["Q2_K Bonsai planning is exposed as a local-runtime option, not as configured generation."
-            .to_owned()]
-    } else {
-        vec![
-            "Q2_0 Bonsai planning is exposed as a local-runtime option, not as configured generation."
-                .to_owned(),
-            "Use the Prism llama.cpp fork or verify stock runtime support before loading Q2_0 GGUF files."
-                .to_owned(),
-        ]
-    };
+    let mut notes = vec![
+        "Q2_0 Bonsai planning is exposed as a local-runtime option, not as configured generation."
+            .to_owned(),
+        format!(
+            "Use the PrismML llama.cpp fork before loading Q2_0 GGUF files: {PRISM_LLAMA_CPP_RELEASE_URL}"
+        ),
+    ];
     match request.gpu.ddr5_ram_gb {
         Some(ram_gb) if ram_gb < spec.minimum_recommended_ddr5_gb => notes.push(format!(
             "Detected DDR5 RAM is below the {} GB recommended spillover budget.",
@@ -870,11 +907,9 @@ fn plan_bonsai_runtime(
             create_args: Vec::new(),
             run_args: Vec::new(),
             server_args: llama_args,
-            notes: if spec.quantization == QuantizationTier::Q2K {
-                vec!["Use a current GGUF-capable llama.cpp build before serving Bonsai.".to_owned()]
-            } else {
-                vec!["Use a Q2_0-capable llama.cpp build before serving Bonsai.".to_owned()]
-            },
+            notes: vec![format!(
+                "Use the PrismML llama.cpp fork for Q2_0 Bonsai: {PRISM_LLAMA_CPP_RELEASE_URL}"
+            )],
         },
         ollama: RuntimeControlPlan {
             supported: spec.ollama_supported,
@@ -922,7 +957,7 @@ fn plan_bonsai_runtime(
                 ]
             } else {
                 vec![
-                    "Q2_0 is not assumed to work in Ollama; treat this Modelfile as a draft until the installed runtime confirms support."
+                    "Q2_0 Bonsai is not routed through Ollama; use Prism llama.cpp llama-server instead."
                         .to_owned(),
                 ]
             },
@@ -1166,6 +1201,7 @@ fn detect_quantization_from_file(file: &str) -> Option<QuantizationTier> {
 fn default_context_for_model(model_id: &str) -> Option<u32> {
     match model_id {
         QWOPUS_MODEL_ID => Some(32_768),
+        QUARTZ_NANO_MODEL_ID => Some(65_536),
         TERNARY_BONSAI_8B_MODEL_ID => Some(65_536),
         TERNARY_BONSAI_4B_MODEL_ID | TERNARY_BONSAI_17B_MODEL_ID => Some(32_768),
         _ => None,
@@ -1368,6 +1404,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(ids.contains(&QWOPUS_MODEL_ID));
+        assert!(ids.contains(&QUARTZ_NANO_MODEL_ID));
         assert!(ids.contains(&TERNARY_BONSAI_8B_MODEL_ID));
         assert!(ids.contains(&TERNARY_BONSAI_4B_MODEL_ID));
         assert!(ids.contains(&TERNARY_BONSAI_17B_MODEL_ID));
@@ -1412,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_bonsai_8b_q2k_with_ollama_import_plan() {
+    fn plans_bonsai_8b_q20_with_prism_llama_cpp_plan() {
         let plan = plan_local_model_runtime(ModelRuntimePlanRequest {
             model_id: TERNARY_BONSAI_8B_MODEL_ID.to_owned(),
             gpu: GpuMemoryProfile {
@@ -1422,14 +1459,36 @@ mod tests {
             quantization: None,
             context_size_tokens: None,
         })
-        .expect("Bonsai 8B Q2_K should have a local runtime plan");
+        .expect("Bonsai 8B Q2_0 should have a local runtime plan");
 
         assert_eq!(plan.repo, TERNARY_BONSAI_8B_REPO);
-        assert_eq!(plan.model_file, "Ternary-Bonsai-8B-Q2_K.gguf");
-        assert_eq!(plan.quantization, QuantizationTier::Q2K);
-        assert_eq!(plan.context_size_tokens, 32_768);
+        assert_eq!(plan.model_file, "Ternary-Bonsai-8B-Q2_0.gguf");
+        assert_eq!(plan.quantization, QuantizationTier::Q20);
+        assert_eq!(plan.context_size_tokens, 65_536);
         assert!(plan.llama_cpp.supported);
-        assert!(plan.ollama.supported);
+        assert!(!plan.ollama.supported);
+    }
+
+    #[test]
+    fn plans_quartz_nano_at_bonsai_base_context() {
+        let plan = plan_local_model_runtime(ModelRuntimePlanRequest {
+            model_id: QUARTZ_NANO_MODEL_ID.to_owned(),
+            gpu: GpuMemoryProfile {
+                dedicated_vram_gb: 12,
+                ddr5_ram_gb: Some(48),
+            },
+            quantization: None,
+            context_size_tokens: None,
+        })
+        .expect("Quartz Nano should plan through the Bonsai Prism runtime");
+
+        assert_eq!(plan.model_id, QUARTZ_NANO_MODEL_ID);
+        assert_eq!(plan.repo, TERNARY_BONSAI_8B_REPO);
+        assert_eq!(plan.model_file, "Ternary-Bonsai-8B-Q2_0.gguf");
+        assert_eq!(plan.quantization, QuantizationTier::Q20);
+        assert_eq!(plan.context_size_tokens, 65_536);
+        assert!(plan.llama_cpp.supported);
+        assert!(!plan.ollama.supported);
     }
 
     #[test]
@@ -1484,7 +1543,7 @@ mod tests {
         let plan = plan_model_import(ModelImportPlanRequest {
             source: ModelImportSource::HuggingFaceRepo {
                 repo: TERNARY_BONSAI_8B_REPO.to_owned(),
-                file: "Ternary-Bonsai-8B-Q2_K.gguf".to_owned(),
+                file: "Ternary-Bonsai-8B-Q2_0.gguf".to_owned(),
             },
             model_id: Some(TERNARY_BONSAI_8B_MODEL_ID.to_owned()),
             quantization: None,
@@ -1495,7 +1554,7 @@ mod tests {
 
         assert!(plan.download_required);
         assert_eq!(plan.repo, Some(TERNARY_BONSAI_8B_REPO.to_owned()));
-        assert_eq!(plan.quantization, Some(QuantizationTier::Q2K));
-        assert!(plan.warnings.is_empty());
+        assert_eq!(plan.quantization, Some(QuantizationTier::Q20));
+        assert!(!plan.warnings.is_empty());
     }
 }

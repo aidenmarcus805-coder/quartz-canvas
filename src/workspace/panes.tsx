@@ -32,7 +32,6 @@ import {
   FunnelSimple,
   Gear,
   GlobeSimple,
-  LockKey,
   MagnifyingGlass,
   MagnifyingGlassPlus,
   Monitor,
@@ -57,9 +56,17 @@ import type { ElementReferencePayload } from "../preview/elementReference";
 export type WorkspaceView = "threads" | "projects" | "search" | "marketplace" | "skills" | "settings";
 export type BrowserMode = "interact" | "select";
 export type LoadState = "idle" | "loaded" | "loading";
-export type ChatMode = "Qwopus" | "Bonsai";
+export type ChatMode = "Qwopus" | "Nano" | "Bonsai";
 export type PermissionMode = "default" | "auto-review" | "full-access";
 export type SkillCreationSource = "frontier_generated" | "frontier_input";
+export type ComposerModelOption = {
+  readonly id: ChatMode;
+  readonly label: string;
+  readonly buttonLabel: string;
+  readonly detail: string;
+  readonly providerModelId: string;
+  readonly runtime: "ollama" | "prism_llama_cpp";
+};
 
 export type ChatMessage = {
   id: string;
@@ -2403,36 +2410,11 @@ function MessageRow({
   );
 }
 
-const modelButtonLabels: Record<ChatMode, string> = {
+const fallbackModelButtonLabels: Record<ChatMode, string> = {
   Qwopus: "Qwopus",
+  Nano: "Nano",
   Bonsai: "Bonsai 8B"
 };
-
-const composerModels: readonly {
-  id: ChatMode | "Prism";
-  label: string;
-  detail: string;
-  locked?: boolean;
-  source?: string;
-}[] = [
-  {
-    id: "Prism",
-    label: "Quartz Prism 1",
-    detail: "Coming soon",
-    locked: true
-  },
-  {
-    id: "Qwopus",
-    label: "Qwopus",
-    detail: "Local GLM 18B merged GGUF"
-  },
-  {
-    id: "Bonsai",
-    label: "Ternary Bonsai 8B",
-    detail: "GGUF Q2_K",
-    source: "lilyanatia/Ternary-Bonsai-8B-GGUF"
-  }
-];
 
 function ComposerSwitch({ active }: { active: boolean }) {
   return (
@@ -2590,6 +2572,7 @@ function ContextWindowIndicator({ contextBudget }: { contextBudget?: ContextBudg
 
 export function PromptComposer({
   chatMode,
+  composerModels,
   contextBudget,
   draftRequest,
   marketplaceModelLabel,
@@ -2600,6 +2583,7 @@ export function PromptComposer({
   selectedElement
 }: {
   chatMode: ChatMode;
+  composerModels: readonly ComposerModelOption[];
   contextBudget?: ContextBudgetInfo | null;
   draftRequest?: { id: string; value: string } | null;
   marketplaceModelLabel?: string | null;
@@ -2626,7 +2610,11 @@ export function PromptComposer({
   const canAttachSelection = Boolean(selectedElement && !selectedElement.stale);
   const selectionAttached = includeSelection && canAttachSelection;
   const canSend = value.trim().length > 0;
-  const activeModelLabel = marketplaceModelLabel?.trim() || modelButtonLabels[chatMode];
+  const activeComposerModel = composerModels.find((model) => model.id === chatMode) ?? null;
+  const activeModelLabel =
+    marketplaceModelLabel?.trim() ||
+    activeComposerModel?.buttonLabel ||
+    fallbackModelButtonLabels[chatMode];
   const attachmentsCount = attachmentLabels.length;
   const attachmentSummary =
     attachmentsCount === 0
@@ -2685,11 +2673,7 @@ export function PromptComposer({
     submitMessage();
   }
 
-  function chooseModel(model: (typeof composerModels)[number]) {
-    if (model.locked || model.id === "Prism") {
-      return;
-    }
-
+  function chooseModel(model: ComposerModelOption) {
     onChatModeChange(model.id);
     setModelMenuOpen(false);
   }
@@ -2848,25 +2832,20 @@ export function PromptComposer({
                   <div className="max-h-40 overflow-auto">
                     {composerModels.map((model) => (
                       <button
-                        aria-label={`${model.label}${model.locked ? ", coming soon" : `, ${model.detail}`}`}
+                        aria-label={`${model.label}, ${model.detail}, ${model.providerModelId}`}
                         aria-selected={!marketplaceModelLabel && model.id === chatMode}
                         className={[
                           "grid h-8 w-full grid-cols-[minmax(0,1fr)_16px] items-center gap-2 rounded-[var(--radius-sm)] px-2 text-left transition-[background-color,color] duration-75 ease-out",
                           !marketplaceModelLabel && model.id === chatMode ? "bg-[var(--control-bg)] text-[var(--text-primary)]" : "",
-                          model.locked
-                            ? "cursor-default text-[var(--text-muted)]"
-                            : "text-[var(--text-primary)] hover:bg-[var(--control-bg-hover)]"
+                          "text-[var(--text-primary)] hover:bg-[var(--control-bg-hover)]"
                         ].join(" ")}
-                        disabled={model.locked}
                         key={model.id}
                         onClick={() => chooseModel(model)}
                         role="option"
                         type="button"
                       >
                         <span className="min-w-0 truncate text-[12px]">{model.label}</span>
-                        {model.locked ? (
-                          <LockKey className="justify-self-end text-[var(--text-muted)]" size={13} weight="regular" />
-                        ) : !marketplaceModelLabel && model.id === chatMode ? (
+                        {!marketplaceModelLabel && model.id === chatMode ? (
                           <Check className="justify-self-end" size={14} weight="regular" />
                         ) : null}
                       </button>
@@ -2916,6 +2895,7 @@ export function PromptComposer({
 
 export function ChatPane({
   chatMode,
+  composerModels,
   contextBudget,
   marketplaceModelLabel,
   onArchiveThread,
@@ -2934,6 +2914,7 @@ export function ChatPane({
   thread
 }: {
   chatMode: ChatMode;
+  composerModels: readonly ComposerModelOption[];
   contextBudget?: ContextBudgetInfo | null;
   marketplaceModelLabel?: string | null;
   onArchiveThread: (threadId: string) => void;
@@ -3134,6 +3115,7 @@ export function ChatPane({
 
       <PromptComposer
         chatMode={chatMode}
+        composerModels={composerModels}
         contextBudget={contextBudget}
         draftRequest={composerDraftRequest}
         marketplaceModelLabel={marketplaceModelLabel}

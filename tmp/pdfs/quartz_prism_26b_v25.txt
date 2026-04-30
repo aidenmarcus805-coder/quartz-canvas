@@ -1,0 +1,775 @@
+
+
+===== PAGE 1 =====
+HERCULES 26B V2.5
+ Gemma 4 26B A4B MoE · Third-Axis Architecture + All Innovations · Final PDF
+ Architecture · Diagram · Benchmarks · Quantisation · Performance · GPU Requirements
+ v2.5 · April 2026 · Quartz Editor Research
+ $400–1,900
+ Cost
+ 3–5 Weeks
+ Timeline
+ ~3.8B native
+ Active Params
+ ~18 GB Q4
+ Tier-1 VRAM
+ 15 Stack
+ Innovations
+0
+1
+Executive Summary
+Hercules 26B V2.5 is the third-axis upgrade to Hercules V2.0. Whereas Hercules V2.0 installed routing, diffusion, and
+speculative decoding, V2.5 opens a fundamentally new dimension of compute: Tensor Product Attention gives the model a third
+relational axis so tokens can attend to the interaction between other tokens, not just the tokens themselves. That third axis then
+unlocks an entire cascade of follow-on innovations — Clifford Geometric Attention, Relational Test-Time Training, TD-MoE
+tensor expert compression, TT-LoRA MoE fine-tuning, Structural Token Merging, Manifold-Constrained Block Diffusion, and
+Tensorial RAG — all of which are architecturally impossible in a bilinear transformer. The 26B A4B is better suited to many of
+these ideas than the 31B Dense because its native expert bank is the exact structure that TD-MoE, TT-LoRA MoE, and
+relational expert routing were designed for. Hercules 26B V2.5 is the faster-shipping, production-first Hercules. The 31B V2.0 is
+the bigger endgame.
+0
+2
+Architecture Thesis — What the Third Axis Unlocks
+Axis
+Mechanism
+Controls
+Cascade unlocked
+Axis 1 —
+Sequence
+Block Diffusion +
+EAGLE-3
+Which tokens
+generate in parallel
+Blockwise decode; already in V2.0
+Axis 2 —
+Depth
+MoD + LayerSkip +
+CLaSp
+Layer budget per
+token
+Self-speculative depth; already in V2.0
+Axis 3 —
+Relation
+(NEW)
+TPA / Clifford Geometric
+Attention
+Token-pair
+interaction structure
+TD-MoE, trilinear LoRA, structural routing,
+manifold diffusion, tensorial RAG,
+relational TTT
+Axis 4 —
+Emergent
+All three axes active
+together
+Inference-time
+reasoning trajectory
+Not designed — discovered from the joint
+constraint
+The 26B A4B already has 3.8B active params and a native expert bank from its MoE architecture. That means V2.5 skips the dense-to-MoE
+conversion step entirely and goes straight to adding the third axis on top of a working sparse model.
+
+
+===== PAGE 2 =====
+0
+3
+Architecture Diagram — Hercules 26B V2.5 Full Stack
+ ■ Vision Tokens Gemma 4 Encoder
+ ✏■ Text + Code + [DOMAIN] Tags
+ ▼
+ PHASE 1 — TPA Installation · Replace GQA with Tensor Product Attention · Third relational axis opens
+ ▼
+ Routing-Free MoE (native — no DUME
+ needed)
+ Symphony-MoE code/vision specialist
+ experts
+ Relational Expert Router (TPA tensor
+ signatures)
+ ▼
+ DECODER CORE ×30 LAYERS · TPA + Gated DeltaNet + RMSNorm + Residual
+ ▼
+ Axis 2: MoD Adaptive depth routing
+Axis 2: LayerSkip Self-speculative draft
+ Axis 2: CLaSp Plug-in layer skip
+ ▼
+ Block Diffusion Axis 1
+ parallel gen
+ EAGLE-3 Feature Draft
+ Denoising collapse
+ Tree Verification
+Flash-compatible
+ Anchored Diffusion Bridge
+ AR→diffusion join
+ ▼
+ THIRD-AXIS EXTENSIONS (NEW in V2.5)
+ Clifford Geom. Attn Bivector
+ directional logic
+ Relational TTT Fast-weight
+ 3rd-axis adapt
+TD-MoE Compression Tucker
+ expert decomp
+ Tensor Conceptors Hard
+ structural constraint
+ Trilinear LoRA / TT-LoRA
+ Quadratic adapt space
+ Structural Token Merging
+Compress by relational equiv
+ Manifold Block Diffusion
+Geodesic on Segre variety
+ Tensorial RAG Retrieve by
+ structure
+ ▼
+ TurboQuant KV 5–6× cache
+ compression
+ LoRA-Drop 2.6× decode,
+ 45–55% KV
+ 128-byte alignment +20–30%
+ bandwidth
+ GPUDirect cold start
+−60–70% load latency
+ ▼
+ Tier 1 — 18 GB Q4 RTX 4090
+ Tier 2 — 12 GB + RAM Offload IQ3/IQ4
+ Tier 3 — Multi-GPU vLLM + P/D Disagg
+ ▼
+ Opus 4.6 CoT Distil · Reasoning fork
+ OUTPUT — Text · Code · JSON · Structured Reasoning
+
+
+===== PAGE 3 =====
+0
+4
+Layer-by-Layer Architecture Map
+Component
+Hercules V2.0
+(baseline)
+Hercules 26B V2.5
+What changes
+Token
+Embedding
+Standard + domain tags
+Tensor-product
+factorized + domain tags
+Required for TPA and relational
+routing
+Attention (×30)
+Gated DeltaNet hybrid
+TPA on global layers +
+Clifford option
+Third-axis relational dimension
+opens
+Expert routing
+Routing-Free MoE + soft
+tags
++ Relational expert
+routing via TPA
+signatures
+Routes by logical structure, not just
+content
+MoE expert
+weights
+Native 26B A4B experts
++ TD-MoE tensor
+decomposition overlay
+Tucker compression across expert
+tensor; better efficiency
+Fine-tuning
+adapters
+QLoRA flat adapters
+TT-LoRA MoE —
+tensorized per-expert
+adapters
+Quadratically more expressive at
+same adapter cost
+Depth routing
+MoD + LayerSkip +
+CLaSp
+Same, now informed by
+Axis 3 relational signal
+Easy tokens identified on 3
+dimensions not 1
+Generation
+Block Diffusion +
+EAGLE-3
++ Manifold-Constrained
+Block Diffusion
+Denoising as geodesic on tensor
+manifold
+Sequence
+compression
+Standard KV
++ Structural Token
+Merging
+Merge tokens with same relational
+signature, not just content
+KV memory
+TurboQuant +
+LoRA-Drop
+Same + periodic tensor
+KV consolidation
+KV shrinks intelligently during long
+context
+Steering /
+alignment
+Routing-Free MoE
+domain tags
++ Tensor Conceptors +
+ODE Tensor Steering
+Hard structural constraint on
+generation
+Retrieval / RAG
+Embedding cosine
+similarity
+Tensorial RAG —
+retrieve by structural
+similarity
+Structural matching for code, video,
+logic
+Test-time
+adaptation
+None
+Relational TTT —
+fast-weight TPA factor
+update
+Model adapts relational weights to
+context before output
+
+
+===== PAGE 4 =====
+0
+5
+All 15 Innovations — Technical Detail
+① Tensor Product Attention — Phase 1 First Install [THIRD AXIS]
+Replace GQA-style attention on global layers with TPA. Q=Qa⊗Qb, K=Ka⊗Kb. Token i attends to the interaction between
+tokens j and k. The relational third axis opens. KV cache shrinks because factors are smaller. No production open-source
+model has shipped TPA.
+→ Directly upgrades the 26B A4B global attention layers
+ 
+→ Foundation for every later tensor-based idea
+ 
+→ Implementable from ICML/NeurIPS 2025 open-source code
+ 
+② Clifford Geometric Attention — Direction-Aware Relational Reasoning
+Extends TPA by using the full Clifford geometric product instead of just the tensor outer product. The bivector component
+encodes the orientation of the plane spanned by two token vectors. The model gets a native sense of "which direction does
+this logical relationship flow?" — essential for causal reasoning, code call-graphs, and proof chains.
+→ Linear complexity via CliffordNet January 2026 architecture
+ 
+→ Token-pair direction encoded, not just strength of relation
+ 
+→ Swap for TPA in the most reasoning-heavy layers
+ 
+③ TD-MoE — Tensor Decomposition for the Native Expert Bank [BEST FIT FOR 26B]
+Stack all expert weight matrices into a 3D tensor, apply multi-linear whitening to remove cross-expert redundancy, then
+Tucker-decompose with ranks r1/r2/r3. Achieves massive expert bank compression by factoring out the shared subspace
+across experts. The 26B A4B native expert bank is the exact target structure this was designed for — better fit than on the
+31B.
+→ No training required; plug-in expert compression
+ 
+→ Expert bank VRAM collapses significantly
+ 
+→ Potentially improves reasoning quality by denoising weight structure
+ 
+④ TT-LoRA MoE — Tensorized Per-Expert Fine-Tuning Adapters
+Replace flat QLoRA adapters with tensor-train LoRA adapters per expert with a sparse router that activates only relevant
+adapters. Reported at 0.03% of AdapterFusion parameters while outperforming it on multi-task benchmarks. Every fine-tuning
+run — Symphony-MoE injection, Opus 4.6 distil, domain specialization — gets a quadratically larger hypothesis space at
+nearly the same adapter cost.
+→ Much more expressive adapters at same parameter budget
+ 
+→ Specialist forks fine-tuned more cleanly
+ 
+→ Used for all Phase 2+ fine-tuning steps
+ 
+⑤ Relational Expert Routing — Route by Structural Signature
+Once TPA is installed, each token has a tensor interaction signature in context. Route experts using that signature as an
+additional routing signal instead of relying purely on soft domain tags. Code tokens with function-call relational structure route
+to code experts. Proof tokens with entailment relational structure route to reasoning experts. No domain tag needed.
+→ Domain-agnostic structural routing
+ 
+→ More discriminative than flat embedding routing
+ 
+→ Direct upgrade to existing Routing-Free MoE
+ 
+
+===== PAGE 5 =====
+⑥ Tensor Conceptors — Hard Geometric Structural Constraint
+Conceptors define ellipsoidal regions in activation space. Tensor Conceptors extend this to the tensor product manifold.
+Define a Code Tensor Conceptor (valid code dependency structures) and a Reasoning Tensor Conceptor (valid logical
+entailment structures). Project third-axis computation to stay inside the relevant conceptor at every attention step. The model
+cannot structurally violate code logic or reasoning chains.
+→ Hard structural enforcement — not RLHF, not a verifier
+ 
+→ Architecture-level logical consistency guarantee
+ 
+→ Especially powerful for Quartz Editor video-editing logic
+ 
+⑦ ODE Tensor Steering — Continuous Relational Alignment
+ODESteer treats activation steering as an ODE with barrier functions. Applied to the third axis: steer the relational tensor flow
+continuously during generation, not with a blunt single-vector injection. AUSteer atomically selects only the discriminative
+tensor dimensions to modify.
+→ Context-sensitive multi-layer tensor steering
+ 
+→ 10× more precise than standard block-level activation steering
+ 
+→ No fine-tuning required
+ 
+⑧ Manifold-Constrained Block Diffusion — Geodesic Reasoning
+TPA weight factorizations live on the Segre variety — a specific algebraic manifold. Standard Block Diffusion denoises in flat
+token embedding space. Constrain denoising to stay on the Segre variety. Every denoising step becomes a geodesic — the
+shortest path in relational space from noise to coherent output. Reasoning cannot produce relationally incoherent intermediate
+states.
+→ Denoising steps are provably structure-consistent
+ 
+→ Shorter geodesics = fewer denoising steps needed
+ 
+→ Fewer hallucinations at intermediate generation states
+ 
+⑨ Structural Token Merging — Compress by Relational Equivalence
+Standard ToMe merges tokens with similar content embeddings. Structural Token Merging merges tokens with the same
+third-axis tensor signature in context. Two function calls with identical argument-passing structure but different names are
+relationally equivalent and can be merged. Compresses 256K context without discarding structural information.
+→ 30–50% context compression without structural information loss
+ 
+→ More aggressive than content-based merging
+ 
+→ Critical for long-context serving on consumer hardware
+ 
+⑩ Relational Test-Time Training — Fast-Weight Third Axis Adaptation
+TTT-E2E showed test-time weight updates are 35× faster than full attention at 2M context. Targeting only TPA factor matrices
+(Qa, Qb, Ka, Kb) instead of full MLPs keeps update cost minimal while adapting exactly the component that encodes relational
+structure. The model reads a codebase and physically adapts its relational attention weights to that codebase before
+generating any output token.
+→ Model internalizes document relational topology before first output
+ 
+→ Transformative for long-context coding tasks like Quartz Editor workflows
+ 
+→ Factor matrices are much smaller than MLP weights — fast to update
+ 
+
+===== PAGE 6 =====
+■ Routing-Free MoE + Symphony-MoE [V2.0 core, now tensor-enhanced]
+Same as V2.0 but now the router receives the third-axis tensor signature as an additional conditioning signal. Symphony-MoE
+code and vision specialization stays. Domain tags stay. The whole routing system becomes more discriminative.
+→ Best coding benchmark uplift driver
+ 
+→ Domain tag + tensor signature dual routing
+ 
+→ Code fork LiveCodeBench target: 85–92%
+ 
+■ Gated DeltaNet Linear Memory
+O(n) linear recurrent attention for long-range layers. Less impactful than on the 31B (5 global layers vs 60) but still essential
+for practical 256K context on consumer hardware.
+→ Critical for long-context MRCR and LongBench tasks
+ 
+→ Pairs with TurboQuant and Structural Token Merging
+ 
+■ TurboQuant KV + LoRA-Drop + 128-byte Layout
+TurboQuant compresses KV 5–6×. LoRA-Drop adds temporal reuse (2.6× decode, 45–55% KV). 128-byte alignment recovers
+20–30% memory bandwidth. All three stack multiplicatively.
+→ Compound memory and bandwidth savings
+ 
+→ LoRA-Drop is plug-in: zero training cost
+ 
+→ Critical for 12–18 GB deployment tiers
+ 
+■ Tensorial RAG — Retrieve by Structural Similarity
+Instead of embedding cosine similarity (bilinear), store document representations as tensor products and retrieve by manifold
+distance in the tensor product space. For Quartz Editor: retrieve video clips with the same temporal-causal relational structure
+as a reference. For coding: retrieve functions with the same logical call-graph topology.
+→ Structural retrieval — possible only with third axis installed
+ 
+→ Transformative for code and video editing workflows
+ 
+→ Long-term competitive differentiator
+ 
+■ Opus 4.6 CoT Distillation
+~3,300 Claude Opus 4.6 CoT traces, QLoRA SFT, 1-epoch hard cap. Highest ROI step in the build. Now done with TT-LoRA
+MoE adapters for better expressivity.
+→ ~$30–80, 4–8 hours on H100
+ 
+→ GPQA +2–4%, AIME +2–3%, HLE +3–4%
+ 
+→ Best run after TPA + Symphony-MoE
+ 
+
+===== PAGE 7 =====
+0
+6
+Benchmark Projections
+V2.5 builds on V2.0 estimated baselines and adds the gains expected from TPA, TD-MoE, Symphony-MoE enhancement, and
+Opus 4.6 distillation via TT-LoRA MoE. The third-axis additions are expected to help reasoning and coding benchmarks most,
+and to enable the long-context uplift via structural compression and DeltaNet.
+Benchmark
+26B A4B
+Stock
+Hercules
+V2.0 est.
+Hercules
+V2.5 est.
+V2.5 key driver
+MMLU Pro
+82.6%
+84–86%
+86–88%
+TPA + relational routing + Opus distil
+LiveCodeBench
+77.1%
+85–89%
+89–93%
+Symphony-MoE + Clifford attn + TT-LoRA
+Codeforces
+ELO
+~1,800
+2,050–2,200
+2,200–2,450
+Code fork + structural routing
+GPQA Diamond
+82.3%
+85–88%
+87–91%
+Tensor Conceptors + Opus CoT distil
+AIME 2026
+88.3%
+90–92%
+92–95%
+Relational TTT + Opus distil + depth
+routing
+HLE (no tools)
+~11%
+14–18%
+18–24%
+Relational reasoning + long-context stack
+BigBench Extra
+Hard
+~68%
+74–80%
+79–86%
+TPA + Clifford + structural token merging
+HumanEval
+~85%
+92–95%
+94–97%
+Code fork + block diffusion + manifold
+constrain
+LongBench
+~60%
+70–78%
+78–88%
+DeltaNet + structural merging + tensorial
+KV
+MRCR v2 128K
+~62%
+72–82%
+80–88%
+Long-context stack + TurboQuant +
+LoRA-Drop
+V2.5 closes a large portion of the gap between the 26B A4B and the 31B dense baseline by exploiting the native MoE structure more deeply with
+tensor-aware compression and routing. LiveCodeBench 89–93% would make it the strongest local coding model in the sub-10B active-param class.
+0
+7
+Performance and Throughput
+Setup
+Quant
+AR baseline
+V2.5 effective
+throughput
+Notes
+RTX 4090 24G
+Q4_K_M
+~22–30 t/s
+~900–1,600 eff. t/s
+Best local target — 3.8B active
+params
+RTX 3090 24G
+Q4_K_M
+~18–25 t/s
+~750–1,300 eff. t/s
+Strong local dev build
+RTX 4080 16G +
+RAM
+IQ4_XS +
+offload
+~8–12 t/s
+~350–700 eff. t/s
+Budget mid-tier
+RTX 3060 12G +
+RAM
+IQ3_XS +
+offload
+~4–7 t/s
+~200–420 eff. t/s
+LoRA-Drop critical here
+2× RTX 4090
+Q8 + P/D
+disagg
+~50–70 t/s
+~2,000–4,200 eff. t/s
+Production API tier
+The 26B A4B advantage over the 31B is that 3.8B active params enables higher pass frequency per second. With MoD reducing per-pass FLOP cost
+and Block Diffusion increasing tokens per pass, the effective throughput is higher than the 31B on the same hardware, even before the 31B reaches
+its more powerful final architecture.
+0
+8
+Quantisation Guide and GPU Requirements
+
+
+===== PAGE 8 =====
+Format
+Size
+Quality
+Best hardware
+BF16
+~24–26 GB
+100%
+RTX 3090/4090 24G — fits natively at BF16!
+Q8_0
+~13–14 GB
+~99%
+RTX 4080 16G / RTX 3080 Ti 12G + RAM
+Q4_K_M
+~7.5–8.5 GB
+~96–97%
+Any 8 GB GPU — major headroom for KV
+Q4_K_S
+~7–8 GB
+~95–96%
+8 GB GPUs, small VRAM budget
+IQ4_XS
+~6–7 GB
+~94–95%
+Very small GPU + RAM offload
+IQ3_XS
+~5–6 GB
+~92–93%
+8G GPU leaves 2–3 GB for KV cache
+TurboQuant
+KV
+KV reduction
+only
+No loss on
+main weights
+Stacks on all tiers
+Tier 1 — 24 GB Native (recommended best local build)
+The 26B A4B in Q4_K_M uses ~7.5–8.5 GB for weights, leaving 15+ GB for KV cache. This is a dramatically more
+comfortable fit than the 31B. BF16 actually fits in 24 GB, which is unique to the 26B A4B.
+→ GPU: RTX 4090 24 GB or RTX 3090 24 GB
+ 
+→ BF16 fits — no quality penalty for local dev
+ 
+→ Massive KV headroom for 128K+ context
+ 
+llama-server --model hercules_26b_v25_q4_k_m.gguf --ctx-size 131072
+--cache-type-k q4_0 --cache-type-v q4_0 --flash-attn --n-gpu-layers 999
+--host 0.0.0.0 --port 8080
+Tier 2 — 8–16 GB Budget Builds
+The small weight footprint means even 8 GB GPUs run this model. IQ3_XS on an RTX 3060 12G leaves enough headroom
+for useful context windows.
+→ 8 GB GPU: IQ3/IQ4 with full local weights, no offload needed
+ 
+→ 12 GB GPU: Q8 fits with RAM assistance
+ 
+→ 16 GB GPU: Q8 natively with solid KV budget
+ 
+llama-server --model hercules_26b_v25_iq3_xs.gguf --ctx-size 16384
+--cache-type-k q4_0 --cache-type-v q4_0 --flash-attn --n-gpu-layers 999
+Tier 3 — Multi-GPU Production
+BF16 or Q8, vLLM, P/D disaggregation. The 26B A4B fits on a single A100 40G in BF16 — cheaper production hardware than
+any 70B+ model.
+→ Single A100 40G fits BF16 comfortably
+ 
+→ 2× 3090 gives full Q8 production quality
+ 
+→ vLLM + P/D disaggregation for high throughput
+ 
+vllm serve hercules_26b_v25_q8.gguf --max-model-len 131072
+--kv-cache-dtype fp8 --speculative-model [self] --num-speculative-tokens 64
+
+
+===== PAGE 9 =====
+0
+9
+Build Roadmap
+Phase
+Tasks
+Cost
+Time
+1
+Install TPA on global attention layers · validate KV
+compression · confirm relational axis active
+$150–450
+4–6 days
+2
+TD-MoE expert compression · TT-LoRA MoE adapter setup ·
+TPA-conditioned relational routing
+$100–350
+3–5 days
+3
+Symphony-MoE code + vision specialization via TT-LoRA ·
+Opus 4.6 CoT distil
+$100–400
+3–5 days
+4
+Clifford Geometric Attention on reasoning layers · Tensor
+Conceptors · ODE Tensor Steering
+$100–350
+3–5 days
+5
+Manifold-Constrained Block Diffusion · Structural Token
+Merging · EAGLE-3 upgrade
+$100–400
+3–5 days
+6
+Quantise + export GGUF tiers · TurboQuant + LoRA-Drop +
+128-byte layout · serving stack
+$50–150
+2–4 days
+7 (opt)
+Relational TTT · Tensorial RAG · periodic KV consolidation ·
+cross-axis 3D routing
+$200–600
+1–2 weeks
+Total (Ph
+1–6)
+$600–2,100
+~3–4 weeks
+1
+0
+Risk Register
+Risk
+Level
+Mitigation
+TPA fine-tune may need extra
+steps on existing MoE + GQA
+combination
+Medium
+Test on smaller scale; keep GQA as fallback
+Clifford attention has less testing at
+LLM scale than TPA
+Medium
+Deploy on a subset of layers first
+Manifold Block Diffusion is novel
+— no direct prior implementation
+High
+Treat as Phase 5 only after stable base
+Relational TTT cost per inference
+step could be significant
+Medium
+Only activate for long-context passes above threshold
+Tensorial RAG requires new index
+infrastructure
+Medium
+Treat as Phase 7 optional
+TD-MoE compression may require
+tuning rank hyperparameters
+Low
+Published results give starting points
+1
+1
+Competitive Position
+Model
+Params
+(total/active)
+MMLU
+Pro
+LiveCode
+GPQA
+Notes
+Hercules 26B V2.5
+(est.)
+26B / 3.8B active
+86–88%
+89–93%
+87–91%
+Third-axis local-first sparse
+Hercules 26B V2.0
+(est.)
+26B / 3.8B active
+84–86%
+85–89%
+85–88%
+Bilinear sparse baseline
+
+
+===== PAGE 10 =====
+Gemma 4 26B A4B
+(stock)
+26B / 3.8B active
+82.6%
+77.1%
+82.3%
+Stock comparison point
+Gemma 4 31B
+(dense)
+31B / 31B
+85.2%
+80.0%
+84.3%
+Dense — all params per token
+Qwen3 30B A3B
+30.5B / 3.3B
+81.4%
+—
+—
+Closest peer by active params
+Qwen 3.5
+397B / ~50B
+87.8%
+83.6%
+88.4%
+13× more active compute than V2.5
+Hercules 26B V2.5 projected at 89–93% LiveCodeBench on 3.8B active params would be the undisputed best coding result in the sub-5B
+active-param open-source category. Qwen 3.5 reaches comparable territory on coding using 13× more active compute per token, on hardware that
+cannot run locally.
+1
+2
+Final Technical Specification
+Parameter
+Value
+Base model
+Gemma 4 26B A4B (MoE, Apache 2.0 compatible)
+Version
+Hercules 26B V2.5
+Total parameters
+26B (unchanged)
+Active params / token
+~3.8B (native MoE architecture, no DUME required)
+Attention
+TPA (global layers) + Clifford Geometric Attention (reasoning layers)
+Expert bank
+Native 26B A4B + TD-MoE Tucker compression + relational routing
+Fine-tuning
+TT-LoRA MoE per-expert tensorized adapters
+Routing
+Routing-Free MoE + soft domain tags + TPA relational signatures
+Depth routing
+MoD + LayerSkip + CLaSp
+Generation
+Block Diffusion + Manifold-Constrained (Segre variety geodesic)
+Context window
+Up to 256K with DeltaNet + Structural Token Merging
+KV strategy
+TurboQuant KV + LoRA-Drop + periodic tensor KV consolidation
+Reasoning distil
+Opus 4.6 CoT via TT-LoRA MoE adapters (~3,300 traces)
+BF16 VRAM
+~24–26 GB — fits natively on RTX 4090 / 3090 24G
+Q4 VRAM
+~7.5–8.5 GB — fits on any 8 GB GPU
+Tier 1 GPU
+RTX 4090 / 3090 24G — BF16 or Q4_K_M
+Tier 2 GPU
+RTX 4080 16G / 4060 Ti 16G / 3060 12G + RAM
+Tier 3
+Single A100 40G or 2× RTX 4090 via vLLM
+Serving
+llama.cpp GGUF local · vLLM + P/D disagg production
+New in V2.5
+TPA, Clifford, TD-MoE, TT-LoRA MoE, Tensor Conceptors, Manifold Diffusion,
+Structural Merging, Relational TTT, Tensorial RAG, ODE Tensor Steering
+Codename
+HERCULES 26B V2.5 — Quartz Editor internal research designation
+Hercules 26B V2.5 is a research architecture specification. Benchmark estimates are projections from stacked published research directions. The
+model does not yet exist as a trained checkpoint. TPA (ICML/NeurIPS 2025), TD-MoE (ICLR 2026), TT-LoRA MoE (April 2025), CLaSp (May 2025),
+and LoRA-Drop (January 2026) all have open-source implementations. Clifford Geometric Attention, Manifold Block Diffusion, Tensor Conceptors,
+and Relational TTT are novel applications of published mathematical frameworks. Produced by Quartz Editor Research · April 2026.

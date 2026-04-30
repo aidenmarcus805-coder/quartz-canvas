@@ -5,16 +5,20 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::{
     ai::{
-        ensure_ollama_model, generate_ollama_chat_response, model_profile_catalog,
+        ensure_ollama_model, ensure_prism_llama_server as ensure_prism_llama_server_runtime,
+        generate_llama_server_chat_response, generate_ollama_chat_response, model_profile_catalog,
         plan_local_model_runtime, plan_model_import, plan_qwopus_runtime,
         plan_qwopus_runtime_from_request, search_hugging_face_gguf_models as search_hf_gguf_models,
+        stop_prism_llama_server as stop_prism_llama_server_runtime,
         unload_ollama_model as unload_ollama_model_runtime, AiModelProfile, AiRequestSnapshot,
         AiRuntimeSnapshot, EnsureOllamaModelRequest, EnsureOllamaModelResponse,
-        GenerateChatResponse, GenerateChatResponseRequest, GpuMemoryProfile, HuggingFaceError,
-        HuggingFaceGgufSearchResponse, LocalChatError, LocalModelError, LocalModelRuntimePlan,
-        ModelImportPlan, ModelImportPlanError, ModelImportPlanRequest, ModelPlanningError,
-        ModelRuntimePlanRequest, ProposeUiChangeRequest, QwopusRuntimePlan,
-        SearchHuggingFaceGgufModelsRequest, UnloadOllamaModelRequest, MODEL_INSTALL_PROGRESS_EVENT,
+        EnsurePrismLlamaServerRequest, EnsurePrismLlamaServerResponse, GenerateChatResponse,
+        GenerateChatResponseRequest, GenerateLlamaServerChatResponseRequest, GpuMemoryProfile,
+        HuggingFaceError, HuggingFaceGgufSearchResponse, LocalChatError, LocalModelError,
+        LocalModelRuntimePlan, ModelImportPlan, ModelImportPlanError, ModelImportPlanRequest,
+        ModelPlanningError, ModelRuntimePlanRequest, PrismRuntimeError, ProposeUiChangeRequest,
+        QwopusRuntimePlan, SearchHuggingFaceGgufModelsRequest, StopPrismLlamaServerRequest,
+        StopPrismLlamaServerResponse, UnloadOllamaModelRequest, MODEL_INSTALL_PROGRESS_EVENT,
         QWOPUS_MODEL_ID,
     },
     app_state::AppState,
@@ -67,10 +71,37 @@ pub async fn ensure_ollama_gguf_model(
 }
 
 #[tauri::command]
+pub async fn ensure_prism_llama_server(
+    request: EnsurePrismLlamaServerRequest,
+) -> Result<EnsurePrismLlamaServerResponse, CommandError> {
+    ensure_prism_llama_server_runtime(request)
+        .await
+        .map_err(prism_runtime_error)
+}
+
+#[tauri::command]
+pub async fn stop_prism_llama_server(
+    request: StopPrismLlamaServerRequest,
+) -> Result<StopPrismLlamaServerResponse, CommandError> {
+    stop_prism_llama_server_runtime(request)
+        .await
+        .map_err(prism_runtime_error)
+}
+
+#[tauri::command]
 pub async fn generate_ollama_chat(
     request: GenerateChatResponseRequest,
 ) -> Result<GenerateChatResponse, CommandError> {
     generate_ollama_chat_response(request)
+        .await
+        .map_err(local_chat_error)
+}
+
+#[tauri::command]
+pub async fn generate_llama_server_chat(
+    request: GenerateLlamaServerChatResponseRequest,
+) -> Result<GenerateChatResponse, CommandError> {
+    generate_llama_server_chat_response(request)
         .await
         .map_err(local_chat_error)
 }
@@ -257,10 +288,15 @@ fn local_model_error(error: LocalModelError) -> CommandError {
         | LocalModelError::InvalidDownloadLimit { .. }
         | LocalModelError::UnsafeLocalModelPath { .. }
         | LocalModelError::LocalModelPathNotFile { .. }
-        | LocalModelError::DownloadTooLarge { .. } => {
+        | LocalModelError::DownloadTooLarge { .. }
+        | LocalModelError::InvalidOllamaEndpoint { .. }
+        | LocalModelError::OllamaEndpointNotLocal { .. } => {
             CommandError::new(ErrorCode::InvalidRequest, message, true)
         }
         LocalModelError::OllamaUnavailable { .. }
+        | LocalModelError::OllamaHttpClient { .. }
+        | LocalModelError::OllamaHttpRequest { .. }
+        | LocalModelError::OllamaHttpStatus { .. }
         | LocalModelError::OllamaTimedOut { .. }
         | LocalModelError::OllamaCommandFailed { .. }
         | LocalModelError::OllamaIo { .. } => {
@@ -301,6 +337,33 @@ fn local_chat_error(error: LocalChatError) -> CommandError {
         | LocalChatError::Http { .. }
         | LocalChatError::Decode { .. }
         | LocalChatError::EmptyResponse => {
+            CommandError::new(ErrorCode::AiRuntimeUnavailable, message, true)
+        }
+    }
+}
+
+fn prism_runtime_error(error: PrismRuntimeError) -> CommandError {
+    let message = error.to_string();
+    match error {
+        PrismRuntimeError::InvalidEndpoint { .. }
+        | PrismRuntimeError::EndpointNotLocal { .. }
+        | PrismRuntimeError::InvalidLoraAdapterPath { .. }
+        | PrismRuntimeError::InvalidLoraAdapterScale { .. }
+        | PrismRuntimeError::InvalidRuntimeTuning { .. }
+        | PrismRuntimeError::InvalidStopTimeout { .. } => {
+            CommandError::new(ErrorCode::InvalidRequest, message, true)
+        }
+        PrismRuntimeError::HomeDirectoryUnavailable
+        | PrismRuntimeError::LauncherMissing { .. }
+        | PrismRuntimeError::StartFailed { .. }
+        | PrismRuntimeError::StartTimedOut { .. }
+        | PrismRuntimeError::StopProcess { .. }
+        | PrismRuntimeError::StopProcessFailed { .. }
+        | PrismRuntimeError::StopRequest { .. }
+        | PrismRuntimeError::StopRejected { .. }
+        | PrismRuntimeError::StopTimedOut { .. }
+        | PrismRuntimeError::RuntimeConfig { .. }
+        | PrismRuntimeError::RuntimeConfigSerialize { .. } => {
             CommandError::new(ErrorCode::AiRuntimeUnavailable, message, true)
         }
     }

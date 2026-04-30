@@ -57,6 +57,15 @@ type OllamaChatChunk = Readonly<{
 }>;
 
 const defaultOllamaKeepAlive = "30s";
+const defaultOllamaStopSequences = [
+  "\nUser:",
+  "\nuser:",
+  "\nAssistant:",
+  "\nassistant:",
+  "<|im_start|>",
+  "<|im_end|>",
+  "<|eot_id|>"
+] as const;
 
 export function createOllamaProvider(options: OllamaProviderOptions = {}): LocalModelProvider {
   const endpoint = normalizeOllamaEndpoint(options.endpoint ?? OLLAMA_DEFAULT_ENDPOINT);
@@ -219,6 +228,11 @@ function toOllamaChatBody(
     temperature: request.temperature,
     num_predict: maxOutputTokens,
     num_ctx: contextWindowTokens,
+    repeat_penalty: 1.18,
+    repeat_last_n: 512,
+    top_p: 0.86,
+    top_k: 40,
+    stop: defaultOllamaStopSequences,
     ...(runtime?.gpuLayers === undefined ? {} : { num_gpu: runtime.gpuLayers }),
     ...(runtime?.cpuThreads === undefined ? {} : { num_thread: runtime.cpuThreads }),
     ...(runtime?.stop === undefined ? {} : { stop: runtime.stop }),

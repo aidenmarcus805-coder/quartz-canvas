@@ -43,6 +43,8 @@ pub fn run() -> tauri::Result<()> {
         .setup(bootstrap::setup)
         .invoke_handler(tauri::generate_handler![
             commands::ai::ensure_ollama_gguf_model,
+            commands::ai::ensure_prism_llama_server,
+            commands::ai::generate_llama_server_chat,
             commands::ai::generate_ollama_chat,
             commands::ai::get_ai_status,
             commands::ai::get_default_model_directory,
@@ -53,6 +55,7 @@ pub fn run() -> tauri::Result<()> {
             commands::ai::plan_qwopus_model_runtime,
             commands::ai::propose_ui_change,
             commands::ai::search_hugging_face_gguf_models,
+            commands::ai::stop_prism_llama_server,
             commands::ai::unload_ollama_model,
             commands::auth::get_auth_session,
             commands::auth::open_auth_url,

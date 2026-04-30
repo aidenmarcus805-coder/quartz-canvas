@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command, time};
+use url::{Host, Url};
 
 use crate::ai::hugging_face::{
     hugging_face_client, validate_hugging_face_gguf_url, HuggingFaceError, HuggingFaceGgufSource,
@@ -16,9 +17,13 @@ use crate::ai::hugging_face::{
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const DEFAULT_OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434";
 const MAX_CONFIGURABLE_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 const MIN_CONTEXT_TOKENS: u32 = 512;
-const MAX_CONTEXT_TOKENS: u32 = 262_144;
+const MAX_CONTEXT_TOKENS: u32 = 65_536;
+const OLLAMA_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const OLLAMA_INSPECT_TIMEOUT: Duration = Duration::from_secs(10);
+const OLLAMA_CREATE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub const MODEL_INSTALL_PROGRESS_EVENT: &str = "ai_model_install_progress";
 
@@ -27,6 +32,7 @@ pub const MODEL_INSTALL_PROGRESS_EVENT: &str = "ai_model_install_progress";
 pub struct EnsureOllamaModelRequest {
     pub ollama_model_name: String,
     pub hugging_face_url: String,
+    pub endpoint: Option<String>,
     pub model_directory: Option<PathBuf>,
     pub context_size_tokens: Option<u32>,
     pub max_download_bytes: Option<u64>,
@@ -82,7 +88,7 @@ pub async fn ensure_ollama_model(
         None,
         "Checking Ollama for the selected model",
     );
-    if ollama_model_exists(&config.ollama_model_name).await? {
+    if ollama_model_exists(&config).await? {
         emit_progress(
             &mut progress,
             &config,
@@ -128,7 +134,12 @@ pub async fn ensure_ollama_model(
         None,
         "Creating Ollama model",
     );
-    create_ollama_model(&config.ollama_model_name, &modelfile_path).await?;
+    create_ollama_model(
+        &config.ollama_model_name,
+        config.endpoint.as_str(),
+        &modelfile_path,
+    )
+    .await?;
 
     emit_progress(
         &mut progress,
@@ -153,6 +164,7 @@ pub async fn ensure_ollama_model(
 struct EnsureModelConfig {
     ollama_model_name: String,
     source: ValidatedHuggingFaceGgufUrl,
+    endpoint: String,
     model_directory: PathBuf,
     context_size_tokens: Option<u32>,
     max_download_bytes: u64,
@@ -163,6 +175,7 @@ impl EnsureModelConfig {
     fn from_request(request: EnsureOllamaModelRequest) -> Result<Self, LocalModelError> {
         let ollama_model_name = normalize_ollama_model_name(&request.ollama_model_name)?;
         let source = validate_hugging_face_gguf_url(&request.hugging_face_url)?;
+        let endpoint = validate_ollama_endpoint(request.endpoint.as_deref())?;
         let model_directory = model_directory_or_default(request.model_directory)?;
         let context_size_tokens = validate_context_size(request.context_size_tokens)?;
         let max_download_bytes = validate_max_download_bytes(request.max_download_bytes)?;
@@ -174,6 +187,7 @@ impl EnsureModelConfig {
         Ok(Self {
             ollama_model_name,
             source,
+            endpoint,
             model_directory,
             context_size_tokens,
             max_download_bytes,
@@ -343,26 +357,64 @@ async fn write_modelfile(
         })
 }
 
-async fn ollama_model_exists(model_name: &str) -> Result<bool, LocalModelError> {
-    let output = run_ollama_command("inspect model", ["show", model_name], None).await?;
-    if output.status.success() {
-        return Ok(true);
+#[derive(Debug, Deserialize)]
+struct OllamaTagsResponse {
+    #[serde(default)]
+    models: Vec<OllamaTagsModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaTagsModel {
+    name: Option<String>,
+    model: Option<String>,
+}
+
+async fn ollama_model_exists(config: &EnsureModelConfig) -> Result<bool, LocalModelError> {
+    let endpoint = ollama_api_endpoint(Some(config.endpoint.as_str()), "/api/tags")?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(OLLAMA_CONNECT_TIMEOUT)
+        .timeout(OLLAMA_INSPECT_TIMEOUT)
+        .build()
+        .map_err(|source| LocalModelError::OllamaHttpClient { source })?;
+
+    let response = time::timeout(OLLAMA_INSPECT_TIMEOUT, client.get(endpoint.clone()).send())
+        .await
+        .map_err(|_| LocalModelError::OllamaTimedOut {
+            action: "inspect model",
+        })?
+        .map_err(|source| LocalModelError::OllamaHttpRequest {
+            action: "inspect model",
+            endpoint: endpoint.clone(),
+            source,
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(LocalModelError::OllamaHttpStatus {
+            action: "inspect model",
+            endpoint,
+            status,
+        });
     }
 
-    let stderr = stderr_text(&output);
-    if stderr.to_ascii_lowercase().contains("not found") {
-        Ok(false)
-    } else {
-        Err(LocalModelError::OllamaCommandFailed {
+    let tags = response
+        .json::<OllamaTagsResponse>()
+        .await
+        .map_err(|source| LocalModelError::OllamaHttpRequest {
             action: "inspect model",
-            status: output.status.code(),
-            stderr,
-        })
-    }
+            endpoint,
+            source,
+        })?;
+
+    Ok(tags.models.iter().any(|model| {
+        model.name.as_deref() == Some(config.ollama_model_name.as_str())
+            || model.model.as_deref() == Some(config.ollama_model_name.as_str())
+    }))
 }
 
 async fn create_ollama_model(
     model_name: &str,
+    endpoint: &str,
     modelfile_path: &Path,
 ) -> Result<(), LocalModelError> {
     let working_directory =
@@ -375,6 +427,7 @@ async fn create_ollama_model(
         "create model",
         ["create", model_name, "-f", "Modelfile"],
         Some(working_directory),
+        Some(endpoint),
     )
     .await?;
 
@@ -393,14 +446,18 @@ async fn run_ollama_command<const N: usize>(
     action: &'static str,
     args: [&str; N],
     working_directory: Option<&Path>,
+    endpoint: Option<&str>,
 ) -> Result<Output, LocalModelError> {
     let mut command = Command::new("ollama");
     command.args(args).kill_on_drop(true);
     if let Some(working_directory) = working_directory {
         command.current_dir(working_directory);
     }
+    if let Some(endpoint) = endpoint {
+        command.env("OLLAMA_HOST", endpoint);
+    }
 
-    let output = time::timeout(Duration::from_secs(120), command.output())
+    let output = time::timeout(OLLAMA_CREATE_TIMEOUT, command.output())
         .await
         .map_err(|_| LocalModelError::OllamaTimedOut { action })?
         .map_err(|source| {
@@ -439,6 +496,55 @@ fn normalize_ollama_model_name(name: &str) -> Result<String, LocalModelError> {
         Err(LocalModelError::InvalidOllamaModelName {
             name: name.to_owned(),
         })
+    }
+}
+
+fn validate_ollama_endpoint(endpoint: Option<&str>) -> Result<String, LocalModelError> {
+    let endpoint = endpoint
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or(DEFAULT_OLLAMA_ENDPOINT);
+    let url = parse_local_ollama_endpoint(endpoint, "/api/tags")?;
+    let mut base_url = url;
+    base_url.set_path("");
+    base_url.set_query(None);
+    base_url.set_fragment(None);
+    Ok(base_url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn ollama_api_endpoint(endpoint: Option<&str>, path: &str) -> Result<Url, LocalModelError> {
+    let endpoint = endpoint
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .unwrap_or(DEFAULT_OLLAMA_ENDPOINT);
+    parse_local_ollama_endpoint(endpoint, path)
+}
+
+fn parse_local_ollama_endpoint(endpoint: &str, path: &str) -> Result<Url, LocalModelError> {
+    let mut url =
+        Url::parse(endpoint).map_err(|source| LocalModelError::InvalidOllamaEndpoint {
+            endpoint: endpoint.to_owned(),
+            source,
+        })?;
+
+    if !matches!(url.scheme(), "http" | "https") || !is_loopback_host(url.host()) {
+        return Err(LocalModelError::OllamaEndpointNotLocal {
+            endpoint: endpoint.to_owned(),
+        });
+    }
+
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -621,6 +727,32 @@ pub enum LocalModelError {
         #[source]
         source: io::Error,
     },
+    #[error("Ollama endpoint is invalid: {endpoint}")]
+    InvalidOllamaEndpoint {
+        endpoint: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("Ollama endpoint must be a local loopback HTTP endpoint: {endpoint}")]
+    OllamaEndpointNotLocal { endpoint: String },
+    #[error("could not create Ollama HTTP client")]
+    OllamaHttpClient {
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Ollama HTTP request failed during {action}: {endpoint}")]
+    OllamaHttpRequest {
+        action: &'static str,
+        endpoint: Url,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Ollama returned HTTP {status} during {action}: {endpoint}")]
+    OllamaHttpStatus {
+        action: &'static str,
+        endpoint: Url,
+        status: StatusCode,
+    },
     #[error("Ollama command timed out during {action}")]
     OllamaTimedOut { action: &'static str },
     #[error("Ollama command failed during {action}: {stderr}")]
@@ -657,6 +789,22 @@ mod tests {
         assert!(matches!(
             validate_context_size(Some(MIN_CONTEXT_TOKENS - 1)),
             Err(LocalModelError::InvalidContextSize { .. })
+        ));
+    }
+
+    #[test]
+    fn validates_loopback_ollama_endpoints() {
+        assert_eq!(
+            validate_ollama_endpoint(Some("http://127.0.0.1:11434")).unwrap(),
+            "http://127.0.0.1:11434"
+        );
+        assert_eq!(
+            validate_ollama_endpoint(Some("http://localhost:11434/api/tags")).unwrap(),
+            "http://localhost:11434"
+        );
+        assert!(matches!(
+            validate_ollama_endpoint(Some("https://example.com:11434")),
+            Err(LocalModelError::OllamaEndpointNotLocal { .. })
         ));
     }
 
